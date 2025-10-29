@@ -1,217 +1,162 @@
+# app/server.py
+# uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
 
-#uvicorn server:app --reload --host 0.0.0.0 --port 8000
+import os, io, cv2, time, json, base64, asyncio, collections
+from typing import Dict, Any, Optional, Set, List, Tuple
+from pathlib import Path
 
-
-import os, io, cv2, jwt, time, base64, asyncio, json, collections
-from typing import Dict, Any, Optional, Set
 import numpy as np
-
 import joblib
-import torch
-import torch.nn as nn
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from ultralytics import YOLO
 
 # =========================
-# Config
+# Configuración
 # =========================
+ROOT_DIR     = Path(__file__).resolve().parent
+STATIC_DIR   = (ROOT_DIR / "static").resolve()
 
-DATA_DIR     = os.environ.get("SIC_DATA_DIR", r"C:\tesis\pose_sequences")
-MODEL_PT     = os.path.join(DATA_DIR, "modelo.pt")
-LGBM_CAL_PKL = os.path.join(DATA_DIR, "lgbm_calibrated.pkl")   # bundle calibrado (dict o estimador)
-LGBM_PKL     = os.path.join(DATA_DIR, "lgbm_model.pkl")        # fallback si no hay calibrado
-POSE_WEIGHTS = os.environ.get("SIC_POSE", "yolov8n-pose.pt")
-TRACKER_CFG  = "bytetrack.yaml"
+# Modelos (ajusta nombres si cambiaste)
+KERAS_MODEL  = Path("./models_mix/mix_cnn_lstm_T32_F51.keras")
+NORM_STATS   = Path("./models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz")
+THRESH_JSON  = Path("./models_mix/mix_cnn_lstm_T32_F51_threshold.json")  # {"best_threshold": 0.xx}
+LGBM_PKL     = Path("./models_mix/lgbm_model.pkl")  # opcional; si no existe, fusión se apaga
 
-DEVICE    = "cuda" if torch.cuda.is_available() else "cpu"
-IMGSZ     = int(os.environ.get("SIC_IMGSZ", "640"))
-CONF_POSE = float(os.environ.get("SIC_CONF", "0.25"))
+# YOLO pose
+POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11m-pose.pt")
+IMGSZ        = int(os.environ.get("POSE_IMGSZ", "640"))
+CONF_POSE    = float(os.environ.get("POSE_CONF", "0.25"))
+IOU_POSE     = float(os.environ.get("POSE_IOU", "0.50"))
+TOPK         = int(os.environ.get("POSE_TOPK", "4"))
+## http://localhost:8000/
+# Ventanas
+SEQ_LEN      = 32           # debe coincidir con el modelo cargado
+STRIDE       = 1            # salto entre frames para la cola interna
+CONF_MIN     = 0.10         # “visible” si conf_joint >= CONF_MIN
+MIN_VIS_FRAC = 0.50         # descartar ventana si <50% frames con algo visible
 
-# Histeresis / pooling / penalizaciones
-HYST_GAP             = 0.10          # diferencia on/off (se usa sobre fusion_thr_video)
-MIN_CONSEC_ON        = 2             # ventanas consecutivas para activar
-MIN_PERSONS_FOR_FULL = 2             # penaliza si hay 1 sola persona
-SOLO_PERSON_PENALTY  = 0.85
-
-# JWT (demo)
-JWT_SECRET   = os.environ.get("SIC_JWT_SECRET", "devsecret")
-JWT_ALG      = "HS256"
-SIC_EMAIL    = os.environ.get("SIC_EMAIL", "    ")
-SIC_PWD      = os.environ.get("SIC_PASSWORD")       # plano (demo)
-SIC_PWD_HASH = os.environ.get("SIC_PASSWORD_HASH")  # bcrypt (prod)
-
-# =========================
-# Modelo LSTM (igual que en train)
-# =========================
-
-class AttnPool(nn.Module):
-    def __init__(self, dim): 
-        super().__init__(); self.proj = nn.Linear(dim, 1)
-    def forward(self, H):      # (B,T,D)
-        a = torch.softmax(self.proj(H).squeeze(-1), dim=1)
-        return (H * a.unsqueeze(-1)).sum(1)
-
-class KeypointLSTM(nn.Module):
-    def __init__(self, in_dim, hid=192, bidir=True, dropout_head=0.35):
-        super().__init__()
-        self.lstm = nn.LSTM(in_dim, hid, num_layers=1, batch_first=True,
-                            bidirectional=bidir, dropout=0.0)
-        D = hid*(2 if bidir else 1)
-        self.pool = AttnPool(D)
-        self.head = nn.Sequential(
-            nn.Linear(D, 192), nn.ReLU(), nn.Dropout(dropout_head),
-            nn.Linear(192, 2)
-        )
-        self.temp_scale = nn.Parameter(torch.ones(1))
-    def forward(self, x):      # x: (B,T,D)
-        H,_ = self.lstm(x)
-        h = self.pool(H)
-        logits = self.head(h) / self.temp_scale.clamp(min=0.5, max=2.0)
-        return logits
+# Fusión con LGBM
+FUSION_W     = 0.50         # 0→solo Keras, 1→solo LGBM (si hay LGBM)
+POOL_METHOD  = "topk"       # "max" | "mean" | "topk"
+TOPK_FRAC    = 0.20         # para pool top-k de scores en el video
+HYST_GAP     = 0.10         # histéresis: thr_off = thr_on - HYST_GAP
 
 # =========================
-# Featurizadores / utils — (2,T,17)
+# Utilidades de pose/features
 # =========================
+def pool_frame_to_51(kps_f: np.ndarray, W: int, H: int) -> np.ndarray:
+    """
+    kps_f: (K,17,3) con (x,y,conf_joint). Devuelve (51,) normalizado por W,H.
+    Por joint, elige la persona con mayor conf en ese joint.
+    """
+    out = np.zeros((17, 3), dtype=np.float32)
+    if kps_f is None or kps_f.size == 0:
+        return out.reshape(-1)
 
-def norm_kpts_by_bbox(kpts_xy, bb):
-    x1,y1,x2,y2 = bb
-    w = max(1e-6, x2-x1); h = max(1e-6, y2-y1)
-    k = kpts_xy.astype(np.float32).copy()
-    k[:,0] = (k[:,0]-x1)/w
-    k[:,1] = (k[:,1]-y1)/h
-    return np.clip(k, 0.0, 1.0)
+    conf_j = kps_f[..., 2]
+    conf_j = np.nan_to_num(conf_j, nan=0.0)
+    K = kps_f.shape[0]
 
-def build_lstm_input(seq_2_T_17: np.ndarray, use_delta: bool) -> torch.Tensor:
-    T = seq_2_T_17.shape[1]
-    x = torch.from_numpy(seq_2_T_17).float().permute(1,0,2).reshape(T, -1)  # (T, 34)
-    if use_delta:
-        dx = torch.zeros_like(x)
-        dx[1:] = x[1:] - x[:-1]
-        x = torch.cat([x, dx], dim=1)  # (T, 68)
-    return x.unsqueeze(0)  # (1, T, D)
+    for j in range(17):
+        if K == 0: break
+        idx = int(np.argmax(conf_j[:, j]))
+        c = conf_j[idx, j]
+        if c > 0:
+            x, y, _ = kps_f[idx, j, :]
+            if np.isfinite(x) and np.isfinite(y):
+                out[j, 0] = np.clip(x / max(W, 1), 0.0, 1.0)
+                out[j, 1] = np.clip(y / max(H, 1), 0.0, 1.0)
+                out[j, 2] = float(np.clip(c, 0.0, 1.0))
+    return out.reshape(-1)
 
-PAIR_DISTS = [(5,6),(9,10),(0,9),(0,10),(11,12),(15,16)]
-def featurize_seq_for_lgbm(seq_2_T_17: np.ndarray) -> np.ndarray:
-    # (2,T,17) -> vector tabular (igual a train)
-    x = seq_2_T_17[0]     # (T,17)
-    yk = seq_2_T_17[1]
-    dx = np.diff(x, axis=0, prepend=x[0:1])
-    dy = np.diff(yk,axis=0, prepend=yk[0:1])
-    v  = np.sqrt(dx*dx + dy*dy)
+def frame_visible(kps_f: np.ndarray, conf_min: float = CONF_MIN) -> bool:
+    if kps_f is None or kps_f.size == 0:
+        return False
+    conf = kps_f[..., 2]
+    conf = np.nan_to_num(conf, nan=0.0)
+    return bool((conf >= conf_min).any())
 
-    def stats(a):
-        return np.concatenate([a.mean(0), a.std(0), a.min(0), a.max(0)], axis=0)
-
-    Fx, Fy, Fv = stats(x), stats(yk), stats(v)
-
-    def pair_dist(i,j):
-        d = np.sqrt((x[:,i]-x[:,j])**2 + (yk[:,i]-yk[:,j])**2)
-        return np.array([d.mean(), d.std()], dtype=np.float32)
-
-    D = np.concatenate([pair_dist(i,j) for (i,j) in PAIR_DISTS], axis=0)  # len=12
-    feat = np.concatenate([Fx, Fy, Fv, D], axis=0).astype(np.float32)
-    return feat.reshape(1, -1)
-
-def pool_scores(scores, pool="topk", topk_frac=0.2):
-    if len(scores)==0: return 0.0
+def pool_scores(scores: List[float], pool: str = "topk", topk_frac: float = 0.2) -> float:
+    if not scores:
+        return 0.0
     arr = np.asarray(scores, dtype=np.float32)
-    if pool=="max":  return float(arr.max())
-    if pool=="mean": return float(arr.mean())
-    k = max(1, int(len(arr)*topk_frac))
+    if pool == "max":
+        return float(arr.max())
+    if pool == "mean":
+        return float(arr.mean())
+    k = max(1, int(len(arr) * topk_frac))
     return float(np.partition(arr, -k)[-k:].mean())
 
 # =========================
-# Carga de artefactos
+# Carga de modelos/artefactos
 # =========================
-
 def load_artifacts():
-    # YOLO pose
+    # Keras
+    if not KERAS_MODEL.exists():
+        raise FileNotFoundError(f"No existe el modelo Keras: {KERAS_MODEL}")
+    keras_model = load_model(str(KERAS_MODEL), compile=False)
+
+    # Stats de normalización
+    if not NORM_STATS.exists():
+        raise FileNotFoundError(f"No existe norm stats: {NORM_STATS}")
+    stats = np.load(NORM_STATS)
+    mu = stats["mean"]  # (1,F)
+    sd = stats["std"]   # (1,F)
+
+    # Umbral óptimo
+    if THRESH_JSON.exists():
+        thr = float(json.loads(Path(THRESH_JSON).read_text(encoding="utf-8")).get("best_threshold", 0.5))
+    else:
+        thr = 0.5
+
+    # LGBM (opcional)
+    lgbm = None
+    if LGBM_PKL.exists():
+        try:
+            lgbm = joblib.load(LGBM_PKL)
+            print(f"[BOOT] LGBM ON → {LGBM_PKL}")
+        except Exception as e:
+            print(f"[BOOT] LGBM: fallo al cargar ({e}), continuo sin LGBM")
+
+    # YOLO Pose
     pose = YOLO(POSE_WEIGHTS)
 
-    # LSTM + meta
-    ckpt = torch.load(MODEL_PT, map_location="cpu")
-    meta = ckpt["meta"]
-    in_dim = int(meta["in_dim"])
-    model = KeypointLSTM(in_dim=in_dim, hid=meta["hid"], bidir=meta["bidir"],
-                         dropout_head=meta["dropout_head"]).to(DEVICE)
-    model.load_state_dict(ckpt["state_dict"], strict=True)
-    model.eval()
+    return keras_model, mu.astype("float32"), sd.astype("float32"), thr, lgbm, pose
 
-    # fusión/umbrales/pooling
-    pool = meta.get("pool","topk")
-    topk_frac = meta.get("topk_frac", 0.2)
-    thr_video_lstm = float(meta.get("threshold_video", meta.get("threshold", 0.5)))
-    fusion_w = float(meta.get("fusion_w", 1.0))                # 1.0 => solo LSTM
-    fusion_thr_video = float(meta.get("fusion_thr_video", thr_video_lstm))
-    use_delta = bool(meta.get("USE_DELTA", True))
-    T = int(meta["T"])
+KERAS, MU, SD, THR_ON, LGBM, POSE = load_artifacts()
+THR_OFF = max(0.0, THR_ON - HYST_GAP)
 
-    # LGBM calibrado o normal
-    cal = None
-    tried = []
-    for path in [LGBM_CAL_PKL, LGBM_PKL]:
-        if os.path.exists(path):
-            try:
-                obj = joblib.load(path)
-                cal = obj if isinstance(obj, dict) else obj
-                print(f"[INFO] LGBM cargado: {path}")
-                break
-            except Exception as e:
-                tried.append((path, str(e)))
-    if cal is None and tried:
-        print("[WARN] No se pudo cargar LGBM:", tried)
-
-    return pose, model, meta, cal, pool, topk_frac, thr_video_lstm, fusion_w, fusion_thr_video, use_delta, T
-
-pose_model, lstm_model, META, LGBM_CAL, POOL_METH, TOPK_FRAC, THR_LSTM_VIDEO, FUSION_W, FUSION_THR_VIDEO, USE_DELTA, T = load_artifacts()
-
-print(f"[BOOT] Device={DEVICE} | T={T} | pool={POOL_METH} topk={TOPK_FRAC} | thr_lstm={THR_LSTM_VIDEO:.3f} fusion_w={FUSION_W:.2f} fusion_thr={FUSION_THR_VIDEO:.3f}")
+print(f"[BOOT] Keras={KERAS_MODEL} | THR_ON={THR_ON:.2f} THR_OFF={THR_OFF:.2f} | T={SEQ_LEN} | FusionW={FUSION_W:.2f} | LGBM={'ON' if LGBM is not None else 'OFF'}")
 
 # =========================
-# Auth (usuario único) con JWT
+# FastAPI + static
 # =========================
+app = FastAPI(title="Violence Detection – Window Level (Keras + optional LGBM)")
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+    @app.get("/")
+    def root():
+        idx = STATIC_DIR / "index.html"
+        return FileResponse(str(idx)) if idx.exists() else JSONResponse({"ok": True, "msg": "sin index.html"})
+else:
+    @app.get("/")
+    def root():
+        return JSONResponse({"ok": True, "msg": "Servidor arriba (sin carpeta static)"})
 
-app = FastAPI(title="Sicher Server")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/")
-def root():
-    return FileResponse("static/index.html")
-
-@app.post("/login", response_model=TokenResponse)
-def login(data: LoginRequest):
-    ok = False
-    if data.email == SIC_EMAIL:
-        if SIC_PWD_HASH:
-            import bcrypt
-            ok = bcrypt.checkpw(data.password.encode(), SIC_PWD_HASH.encode())
-        elif SIC_PWD:
-            ok = (data.password == SIC_PWD)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    payload = {"sub": data.email, "iat": int(time.time()), "exp": int(time.time()) + 12*3600}
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-    return TokenResponse(access_token=token)
 
 # =========================
-# Gestión de cámaras
+# Gestión de cámaras simples
 # =========================
-
 class CameraConfig(BaseModel):
     cam_id: str
-    src: str  # "0"/"1"/rtsp/http/file path
+    src: str  # índice de cam (e.g., "0") o ruta/rtsp
 
 CAMERAS: Dict[str, CameraConfig] = {}
 
@@ -229,10 +174,10 @@ def del_camera(cam_id: str):
     CAMERAS.pop(cam_id, None)
     return {"ok": True}
 
-# =========================
-# Worker y WebSocket
-# =========================
 
+# =========================
+# Worker por cámara (sin tracking por persona)
+# =========================
 class CameraWorker:
     def __init__(self, cam_id: str, src: str):
         self.cam_id = cam_id
@@ -241,11 +186,14 @@ class CameraWorker:
         self.running = False
         self.task: Optional[asyncio.Task] = None
 
-        # por persona (track id) → deque de (2,17) por frame
-        self.per_id_seq: Dict[int, collections.deque] = {}
-        self.per_id_scores: Dict[int, list] = {}
-        self.per_id_streak: Dict[int, int] = {}
-        self.alerts_on: Dict[int, bool] = {}
+        # buffer de ventana para el video (no por persona)
+        self.win_feats: collections.deque = collections.deque(maxlen=SEQ_LEN)  # (51,) por frame
+        self.win_vis:   collections.deque = collections.deque(maxlen=SEQ_LEN)  # bool por frame
+        self.video_scores: List[float] = []  # scores por ventana
+        self.on_state = False  # estado ON/OFF por histéresis
+
+        self.W = None
+        self.H = None
 
     async def start(self):
         if self.running:
@@ -260,131 +208,141 @@ class CameraWorker:
             self.task.cancel()
             self.task = None
 
+    def _norm_apply(self, X: np.ndarray) -> np.ndarray:
+        """
+        Aplica normalización por-feature con MU/SD de entrenamiento.
+        X: (1, T, F)
+        """
+        T, F = X.shape[1], X.shape[2]
+        X2 = X.reshape(-1, F)
+        Xn = (X2 - MU) / (SD + 1e-6)
+        return Xn.reshape(1, T, F).astype("float32")
+
+    def _predict_window(self, Xw: np.ndarray) -> float:
+        """
+        Xw: (T, 51), retorna prob(1) fusionada (Keras [+ LGBM opcional]).
+        """
+        X = Xw[np.newaxis, ...]                       # (1,T,51)
+        X = self._norm_apply(X)                       # normaliza
+        p_keras = float(KERAS.predict(X, verbose=0).ravel()[0])
+
+        if LGBM is None or FUSION_W <= 0.0:
+            return p_keras
+
+        # Features tabulares para LGBM (estadísticas simples por joint y velocidades aproximadas)
+        # -- mismas que se usaron al entrenar el LGBM (si tú lo definiste distinto, ajusta aquí) --
+        x = Xw  # (T,51) → reinterpreta a (T,17,3)
+        x3 = x.reshape(x.shape[0], 17, 3)
+        xy = x3[..., :2]         # (T,17,2)
+        dx = np.diff(xy, axis=0, prepend=xy[0:1])   # (T,17,2)
+        v  = np.linalg.norm(dx, axis=-1)            # (T,17)
+
+        def stats(a):
+            return np.concatenate([a.mean(0).ravel(),
+                                   a.std(0).ravel(),
+                                   a.min(0).ravel(),
+                                   a.max(0).ravel()], axis=0)
+
+        feat = np.concatenate([stats(xy[...,0]), stats(xy[...,1]), stats(v)], axis=0).astype(np.float32)
+        p_lgbm = float(LGBM.predict_proba(feat.reshape(1, -1))[:, 1][0])
+
+        return (1.0 - FUSION_W) * p_keras + FUSION_W * p_lgbm
+
     async def run(self):
         cap = None
         try:
+            # abrir fuente
             if self.src.strip().isdigit():
                 cap = cv2.VideoCapture(int(self.src.strip()))
             else:
                 cap = cv2.VideoCapture(self.src)
                 if not cap.isOpened():
-                    # intentar FFMPEG
                     cap.release()
                     cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
             if not cap.isOpened():
-                await self.broadcast({"type":"error","msg":"no-open"})
+                await self.broadcast({"type": "error", "msg": "no-open"})
                 return
 
-            fps, t0 = 0.0, time.time()
+            fps_smooth, t0 = 0.0, time.time()
+            self.W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
             while self.running and cap.isOpened():
                 ok, frame = cap.read()
                 if not ok:
-                    await self.broadcast({"type":"error","msg":"eof"})
+                    await self.broadcast({"type": "error", "msg": "eof"})
                     break
 
-                # Pose + ByteTrack
-                res = pose_model.track(frame, imgsz=IMGSZ, conf=CONF_POSE,
-                                       tracker="bytetrack.yaml", persist=True,
-                                       verbose=False, device=0 if DEVICE=="cuda" else "cpu",
-                                       half=(DEVICE=="cuda"))[0]
+                # === Pose (sin tracking personas) ===
+                res = POSE.predict(frame, imgsz=IMGSZ, conf=CONF_POSE, iou=IOU_POSE,
+                                   verbose=False, half=False)[0]
 
-                p_win_disp, p_vid_disp, alert_disp = 0.0, 0.0, False
-                n_persons = 0
+                kps_f = None
+                if res.keypoints is not None and res.keypoints.xy is not None and res.keypoints.xy.shape[0] > 0:
+                    xy = res.keypoints.xy.detach().cpu().numpy()  # (P,17,2)
+                    c  = getattr(res.keypoints, "confidence", None) or getattr(res.keypoints, "conf", None)
+                    if c is not None:
+                        c = c.detach().cpu().numpy()              # (P,17)
+                    else:
+                        c = np.ones(xy.shape[:2], dtype=np.float32)
+                    # ordenar personas por conf media
+                    order = np.argsort(-c.mean(axis=1))
+                    P = min(len(order), TOPK)
+                    xy = xy[order[:P]]
+                    c  = c[order[:P]]
+                    # ensamblar (x,y,conf_joint)
+                    kps_f = np.concatenate([xy, c[..., None]], axis=-1).astype(np.float32)  # (P,17,3)
 
-                if res.boxes is not None and res.keypoints is not None and res.boxes.cls is not None:
-                    cls = res.boxes.cls.int().cpu().numpy()
-                    person = (cls == 0)
-                    if person.any() and res.boxes.id is not None:
-                        xyxy = res.boxes.xyxy.cpu().numpy()[person]
-                        ids  = res.boxes.id.int().cpu().numpy()[person]
-                        has_k = (res.keypoints.xy is not None)
-                        kpts = res.keypoints.xy.cpu().numpy()[person] if has_k else None
-                        n_persons = len(ids)
+                # features por frame
+                feat51 = pool_frame_to_51(kps_f, self.W, self.H)  # (51,)
+                vis = frame_visible(kps_f, CONF_MIN)
 
-                        for j, tid in enumerate(ids):
-                            if kpts is None: continue
-                            bb = xyxy[j]
-                            k_xy = kpts[j]                # (17,2)
-                            nk = norm_kpts_by_bbox(k_xy, bb)  # (17,2) en [0,1]
+                self.win_feats.append(feat51)
+                self.win_vis.append(1.0 if vis else 0.0)
 
-                            dq = self.per_id_seq.get(tid)
-                            if dq is None:
-                                dq = collections.deque(maxlen=T); self.per_id_seq[tid] = dq
-                                self.per_id_scores[tid] = []; self.per_id_streak[tid] = 0; self.alerts_on[tid] = False
-                            dq.append(nk.T)  # (2,17) por frame
+                p_win = 0.0
+                p_vid = 0.0
 
-                            if len(dq) == T:
-                                # (2,T,17)
-                                seq = np.stack(list(dq), axis=0).transpose(1,0,2).astype(np.float32)
+                if len(self.win_feats) == SEQ_LEN:
+                    vis_frac = np.mean(self.win_vis)
+                    if vis_frac >= MIN_VIS_FRAC:
+                        Xw = np.stack(self.win_feats, axis=0)  # (T,51)
+                        p_win = self._predict_window(Xw)
+                        self.video_scores.append(p_win)
+                        p_vid = pool_scores(self.video_scores, pool=POOL_METHOD, topk_frac=TOPK_FRAC)
 
-                                # --- LSTM ---
-                                x = build_lstm_input(seq, USE_DELTA).to(DEVICE)  # (1,T,D)
-                                with torch.no_grad():
-                                    logits = lstm_model(x)
-                                    p_lstm = torch.softmax(logits, dim=1)[:,1].item()
+                        # histéresis
+                        if not self.on_state and p_vid >= THR_ON:
+                            self.on_state = True
+                            await self.broadcast({"type": "alert", "cam_id": self.cam_id, "prob": float(p_vid), "ts": time.time()})
+                        elif self.on_state and p_vid <= THR_OFF:
+                            self.on_state = False
 
-                                # --- LGBM (si disponible) ---
-                                if LGBM_CAL is not None:
-                                    F = featurize_seq_for_lgbm(seq)   # (1,D_tab)
-                                    clf = LGBM_CAL["clf"] if isinstance(LGBM_CAL, dict) and "clf" in LGBM_CAL else LGBM_CAL
-                                    p_lgbm = float(clf.predict_proba(F)[:,1][0])
-                                else:
-                                    p_lgbm = p_lstm
-
-                                # --- fusión tardía (ventana) ---
-                                p_win = (1.0 - FUSION_W) * p_lstm + (FUSION_W) * p_lgbm
-                                if n_persons < MIN_PERSONS_FOR_FULL:
-                                    p_win *= SOLO_PERSON_PENALTY
-
-                                self.per_id_scores[tid].append(p_win)
-                                p_vid = pool_scores(self.per_id_scores[tid], pool=POOL_METH, topk_frac=TOPK_FRAC)
-
-                                # Histeresis usando threshold de fusión
-                                thr_on  = FUSION_THR_VIDEO
-                                thr_off = max(0.0, FUSION_THR_VIDEO - HYST_GAP)
-
-                                if not self.alerts_on[tid]:
-                                    if p_vid >= thr_on:
-                                        self.per_id_streak[tid] += 1
-                                        if self.per_id_streak[tid] >= MIN_CONSEC_ON:
-                                            self.alerts_on[tid] = True
-                                            self.per_id_streak[tid] = 0
-                                            await self.broadcast({"type":"alert","cam_id":self.cam_id,"prob":float(p_vid),"ts":time.time()})
-                                    else:
-                                        self.per_id_streak[tid] = 0
-                                else:
-                                    if p_vid <= thr_off:
-                                        self.alerts_on[tid] = False
-                                        self.per_id_streak[tid] = 0
-
-                                # para overlay
-                                p_win_disp = max(p_win_disp, float(p_win))
-                                p_vid_disp = max(p_vid_disp, float(p_vid))
-                                alert_disp = alert_disp or self.alerts_on[tid]
-
-                # plot + HUD
+                # HUD
                 try:
                     show = res.plot() if res is not None else frame
                 except Exception:
                     show = frame
 
-                fps = 0.9*fps + 0.1*(1.0/max(1e-6, time.time()-t0)); t0 = time.time()
-                cv2.putText(show, f"fps={fps:.1f}", (20, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230,230,230), 2)
-                cv2.putText(show, f"p_win={p_win_disp:.2f}  p_vid={p_vid_disp:.2f}", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230,230,230), 2)
-                if alert_disp:
+                fps_smooth = 0.9 * fps_smooth + 0.1 * (1.0 / max(1e-6, time.time() - t0)); t0 = time.time()
+                cv2.putText(show, f"fps={fps_smooth:.1f}", (20, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230,230,230), 2)
+                cv2.putText(show, f"p_win={p_win:.2f}  p_vid={p_vid:.2f}", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230,230,230), 2)
+                if self.on_state:
                     cv2.putText(show, "ALERTA", (20, 90), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0,0,255), 3)
 
-                # enviar frame a clientes
-                _, buf = cv2.imencode('.jpg', show)
+                # enviar frame
+                _, buf = cv2.imencode(".jpg", show)
                 b64 = base64.b64encode(buf.tobytes()).decode()
                 payload = {
-                    "type":"frame", "cam_id":self.cam_id, "p_win":p_win_disp, "p_vid":p_vid_disp,
-                    "on":bool(alert_disp), "ts":time.time(), "jpg_b64":b64
+                    "type": "frame", "cam_id": self.cam_id,
+                    "p_win": float(p_win), "p_vid": float(p_vid),
+                    "on": bool(self.on_state), "ts": time.time(),
+                    "jpg_b64": b64
                 }
                 await self.broadcast(payload)
 
-                # rate limit mínimo (ajusta si quieres más fps)
-                await asyncio.sleep(0.01)
+                # control de ritmo
+                await asyncio.sleep(0.005)
         finally:
             if cap is not None:
                 cap.release()
@@ -400,27 +358,15 @@ class CameraWorker:
 
 WORKERS: Dict[str, CameraWorker] = {}
 
-# --- Auth para WS ---
-async def verify_token(token: str) -> str:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        return payload["sub"]
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
+# =========================
+# WebSocket (simple, sin JWT)
+# =========================
 @app.websocket("/ws/stream/{cam_id}")
-async def ws_stream(websocket: WebSocket, cam_id: str, token: Optional[str] = None):
-    if not token:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION); return
-    try:
-        _user = await verify_token(token)
-    except HTTPException:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION); return
-
+async def ws_stream(websocket: WebSocket, cam_id: str):
     await websocket.accept()
     cfg = CAMERAS.get(cam_id)
     if cfg is None:
-        await websocket.send_json({"type":"error","msg":"cam-not-found"})
+        await websocket.send_json({"type": "error", "msg": "cam-not-found"})
         await websocket.close()
         return
 
@@ -429,11 +375,11 @@ async def ws_stream(websocket: WebSocket, cam_id: str, token: Optional[str] = No
         worker = CameraWorker(cam_id, cfg.src)
         WORKERS[cam_id] = worker
         await worker.start()
+
     worker.clients.add(websocket)
 
     try:
         while True:
-            # opcional: recibir comandos (p.ej. cambiar thresholds)
-            _ = await websocket.receive_text()
+            _ = await websocket.receive_text()  # reservado: comandos
     except WebSocketDisconnect:
         worker.clients.discard(websocket)
