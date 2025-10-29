@@ -20,7 +20,7 @@ anomaly_labels
 .idea/
 venv
 .venv
-
+yolo11m-pose.pt
 # Ignorar datasets o modelos grandes
 data/
 models/
