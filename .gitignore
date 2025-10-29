@@ -1,0 +1,24 @@
+# Ignorar archivos temporales y de sistema
+*.log
+*.tmp
+# Ignorar carpetas específicas
+__pycache__/
+node_modules/
+dist/
+build/
+out_npz
+out_npz_fall
+out_npz_video
+DATASETS_COMBINADOS
+Dataset_Le21+GMDCSA24
+CHAD_VIDEOS
+anomaly_labels
+
+# Ignorar configuraciones locales
+.env
+.vscode/
+.idea/
+
+# Ignorar datasets o modelos grandes
+data/
+models/
