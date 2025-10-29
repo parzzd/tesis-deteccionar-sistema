@@ -18,6 +18,8 @@ anomaly_labels
 .env
 .vscode/
 .idea/
+venv
+.venv
 
 # Ignorar datasets o modelos grandes
 data/
