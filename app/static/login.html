@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VigilIA – Iniciar sesión</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#0f1522;--card:#0e1421;--mut:#9aa4b2;--txt:#e6edf3;--b:#1e2636;--btn:#335cce}
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
+  .wrap{min-height:100vh;display:grid;place-items:center;background:radial-gradient(80% 60% at 50% 10%,#0f1729 0%,#0b0f17 60%)}
+  .shell{width:min(92vw,520px);background:rgba(12,18,30,.8);border:1px solid #1a2234;border-radius:18px;box-shadow:0 10px 40px rgba(0,0,0,.35);padding:28px}
+  .logo{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+  .badge{width:34px;height:34px;border-radius:50%;border:2px solid #6aa7ff;display:grid;place-items:center}
+  h1{font-size:28px;margin:0;font-weight:800;letter-spacing:.3px}
+  h2{margin:12px 0 14px;font-size:18px;font-weight:700}
+  label{display:block;margin:10px 0 6px;color:var(--mut);font-size:13px}
+  .in{width:100%;padding:12px 14px;border-radius:12px;background:var(--card);border:1px solid var(--b);color:var(--txt);outline:none}
+  .row{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+  .mut{color:var(--mut);font-size:13px}
+  .btn{width:100%;padding:12px 14px;border:none;border-radius:12px;background:var(--btn);color:#fff;cursor:pointer;font-weight:600}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .hint{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--mut);font-size:12px}
+  .foot{margin-top:10px;text-align:right}
+  a{color:#8fb3ff;text-decoration:none}
+  .err{display:none;margin-bottom:10px;background:#3a1116;border:1px solid #6b1f28;color:#ffb4b8;padding:10px;border-radius:10px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="shell">
+    <div class="logo">
+      <div class="badge">🛡️</div>
+      <h1>VigilIA</h1>
+    </div>
+
+    <h2>Iniciar sesión</h2>
+    <div id="err" class="err"></div>
+
+    <label>Nombre de usuario</label>
+    <input id="email" class="in" placeholder="usuario@vigilia.io" autocomplete="username"/>
+
+    <label>Contraseña</label>
+    <input id="password" type="password" class="in" placeholder="••••••••" autocomplete="current-password"/>
+
+    <div class="row">
+      <label class="mut" style="display:flex;align-items:center;gap:8px">
+        <input id="remember" type="checkbox" style="accent-color:#5f89ff"/> Recuérdame
+      </label>
+      <div class="mut"><a href="#" onclick="alert('Pide a un admin restablecer tu clave.');return false;">¿Olvidó su contraseña?</a></div>
+    </div>
+
+    <div style="margin-top:14px"><button id="btn" class="btn">Iniciar sesión</button></div>
+
+    <div class="hint">
+      <input type="checkbox" id="twofa" disabled style="accent-color:#5f89ff"/>
+      <label for="twofa">Iniciar sesión con verificación en dos pasos</label>
+    </div>
+
+    <div class="foot"><span class="mut">Español ▾</span></div>
+  </div>
+</div>
+
+<script>
+const $ = s=>document.querySelector(s);
+const tokenKey='sicher.token', emailKey='sicher.email';
+
+// si venimos de fallo, mostrar mensaje
+const qp = new URLSearchParams(location.search);
+if(qp.get('err')){
+  const e=$('#err'); e.textContent='Credenciales inválidas. Intenta nuevamente.'; e.style.display='block';
+}
+const remembered = localStorage.getItem(emailKey);
+if(remembered){ $('#email').value = remembered; $('#remember').checked = true; }
+
+async function doLogin(){
+  const btn=$('#btn'); btn.disabled=true;
+  const email = $('#email').value.trim();
+  const password = $('#password').value;
+  try{
+    const res = await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+    if(!res.ok){
+      location.href = '/static/login_fail.html';
+      return;
+    }
+    const data = await res.json();
+    if($('#remember').checked) localStorage.setItem(emailKey, email); else localStorage.removeItem(emailKey);
+    // OK → ir al dashboard
+    localStorage.setItem('sicher.token', data.access_token);
+    localStorage.setItem('sicher.email', email);
+    window.location.href = '/static/index.html';
+  }catch(err){
+    location.href = '/static/login_fail.html';
+  }finally{
+    btn.disabled=false;
+  }
+}
+$('#btn').onclick=doLogin;
+document.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin();});
+</script>
+</body>
+</html>

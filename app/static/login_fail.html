@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VigilIA – Identidad no validada</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#0f1522;--mut:#9aa4b2;--txt:#e6edf3;--b:#1e2636;--err:#c73a3a}
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
+  .wrap{min-height:100vh;display:grid;place-items:center}
+  .shell{width:min(92vw,520px);background:rgba(12,18,30,.88);border:1px solid #1a2234;border-radius:18px;box-shadow:0 12px 44px rgba(0,0,0,.4);padding:28px}
+  .banner{background:#3a1116;border:1px solid #6b1f28;color:#ffb4b8;padding:10px 12px;border-radius:10px;font-weight:600;margin-bottom:14px}
+  h2{margin:8px 0 6px}
+  .mut{color:var(--mut)}
+  .row{display:flex;gap:10px;margin-top:12px}
+  .btn{flex:1;padding:12px 14px;border-radius:12px;border:1px solid #2a3756;background:#1b2a47;color:#e6edf3;cursor:pointer;font-weight:600}
+  .btn:hover{filter:brightness(1.08)}
+  .actions{display:flex;align-items:center;gap:12px;margin-top:16px}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid #2a3756;background:#11192b;color:#cbd5e1;font-size:12px}
+  .code{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-top:12px}
+  .slot{height:14px;border-bottom:2px dashed #2a3756}
+  .foot{margin-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="shell">
+    <div class="banner">❗ No se pudo validar tu identidad</div>
+    <h2>No se pudo validar tu identidad</h2>
+    <p class="mut">Verificación fallida (02/03 intentos)</p>
+
+    <div class="row">
+      <button class="btn" onclick="retry()">Reintentar</button>
+      <button class="btn" onclick="other()">Usar otro método</button>
+    </div>
+
+    <div class="foot">
+      <a class="mut" href="#" onclick="alert('Soporte: soporte@vigilia.io');return false;">Contactar soporte</a>
+    </div>
+
+    <div class="code">
+      <div class="slot"></div><div class="slot"></div><div class="slot"></div>
+      <div class="slot"></div><div class="slot"></div><div class="slot"></div>
+    </div>
+
+    <div class="actions">
+      <label class="pill"><input type="checkbox" disabled style="accent-color:#5f89ff"/> Enviar código nuevamente</label>
+      <label class="pill"><input type="checkbox" disabled style="accent-color:#5f89ff"/> CAPTCHA</label>
+      <label class="pill"><input type="checkbox" disabled style="accent-color:#5f89ff"/> Bloquear tras varios intentos</label>
+    </div>
+  </div>
+</div>
+
+<script>
+function retry(){ location.href = '/static/login.html?err=1'; }
+function other(){ alert('Habilite 2FA o recupere su cuenta con un admin.'); }
+</script>
+</body>
+</html>

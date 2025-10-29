@@ -32,25 +32,13 @@
 <header>
   <h1>📹 Sicher</h1>
   <div class="sp"></div>
-  <div id="who" class="muted">No autenticado</div>
+  <div id="who" class="muted">—</div>
+  <button id="btnLogout" class="sec" style="width:auto">Cerrar sesión</button>
 </header>
 
 <main>
   <section class="panel" id="left">
-    <h2 style="margin-top:0">Inicio de sesión</h2>
-    <label>Email</label>
-    <input id="email" placeholder="admin@sicher.ai" value="admin@sicher.ai" />
-    <label>Password</label>
-    <input id="password" type="password" placeholder="••••••••" value="admin123" />
-    <div class="row" style="margin-top:10px">
-      <button id="btnLogin">Iniciar sesión</button>
-      <button id="btnLogout" class="sec">Cerrar sesión</button>
-    </div>
-    <p class="muted" style="margin-top:8px">Se genera un <b>JWT</b> (12 h). Se guarda en <code>localStorage</code>.</p>
-
-    <hr style="margin:16px 0;border-color:#1e2636" />
-
-    <h2>Registrar cámara</h2>
+    <h2 style="margin-top:0">Registrar cámara</h2>
     <div class="row">
       <div>
         <label>ID</label>
@@ -88,29 +76,17 @@
 const $ = s => document.querySelector(s);
 const tokenKey = 'sicher.token';
 const emailKey = 'sicher.email';
-const wsMap = new Map(); // cam_id -> WebSocket
+const wsMap = new Map();
 
-function hostBase(){
-  const {protocol, host} = window.location;
-  return `${protocol}//${host}`;
-}
-function wsBase(){
-  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
-  return `${proto}://${location.host}`;
-}
-function setWho(email){
-  $('#who').innerHTML = email ? `Autenticado: <b>${email}</b>` : 'No autenticado';
-}
+function wsBase(){ const proto = (location.protocol === 'https:') ? 'wss' : 'ws'; return `${proto}://${location.host}`; }
+function setWho(email){ $('#who').innerHTML = email ? `Autenticado: <b>${email}</b>` : 'No autenticado'; }
 
-function badge(text, cls='pill'){ return `<span class="${cls}">${text}</span>` }
 function rowCam(cfg){
   const div = document.createElement('div');
   div.className='alertrow';
   div.innerHTML = `
     <div class="statusdot" id="dot-${cfg.cam_id}" style="background:#666"></div>
-    <div style="flex:1">
-      <div><b>${cfg.cam_id}</b> <span class="muted">${cfg.src}</span></div>
-    </div>
+    <div style="flex:1"><div><b>${cfg.cam_id}</b> <span class="muted">${cfg.src}</span></div></div>
     <button data-cam="${cfg.cam_id}" class="sec btnOpen" style="width:auto">Abrir</button>
     <button data-cam="${cfg.cam_id}" class="sec btnClose" style="width:auto">Cerrar</button>
     <button data-cam="${cfg.cam_id}" class="sec btnDel" style="width:auto">Eliminar</button>
@@ -126,9 +102,7 @@ function camCard(cam_id){
     <div class="camhead">
       <div>
         <h3>${cam_id}</h3>
-        <div class="cammeta">
-          <span id="meta-${cam_id}">p_win: 0.000 · p_vid: 0.000</span>
-        </div>
+        <div class="cammeta"><span id="meta-${cam_id}">p_win: 0.000 · p_vid: 0.000</span></div>
       </div>
       <div class="row" style="max-width:260px">
         <button class="sec" onclick="closeWS('${cam_id}')">Detener</button>
@@ -151,54 +125,40 @@ function addAlert(msg){
   $('#alerts').prepend(row);
 }
 
-async function login(){
-  const email = $('#email').value.trim();
-  const password = $('#password').value;
-  const res = await fetch(hostBase()+"/login",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
-  if(!res.ok){ alert('Login fallido'); return; }
-  const data = await res.json();
-  localStorage.setItem(tokenKey, data.access_token);
-  localStorage.setItem(emailKey, email);
-  setWho(email);
-}
 function logout(){
   localStorage.removeItem(tokenKey);
   localStorage.removeItem(emailKey);
-  setWho(null);
+  window.location.href = '/static/login.html';
 }
 
 async function addCamera(){
   const cam_id = $('#cam_id').value.trim();
   const src = $('#cam_src').value.trim();
   if(!cam_id || !src) return alert('Completa cam_id y src');
-  const res = await fetch(hostBase()+"/cameras",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cam_id,src})});
+  const res = await fetch("/cameras",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cam_id,src})});
   if(!res.ok){ alert('No se pudo registrar'); return; }
   await loadCameras();
 }
+
 async function deleteCamera(cam_id){
-  await fetch(hostBase()+"/cameras/"+encodeURIComponent(cam_id),{method:'DELETE'});
+  await fetch("/cameras/"+encodeURIComponent(cam_id),{method:'DELETE'});
   await loadCameras();
 }
 
 async function loadCameras(){
-  const res = await fetch(hostBase()+"/cameras");
+  const res = await fetch("/cameras");
   const cams = await res.json();
   const list = $('#camList'); list.innerHTML='';
-  cams.forEach(cfg=>{
-    const row = rowCam(cfg); list.appendChild(row);
-  });
-  // wire buttons
+  cams.forEach(cfg=> list.appendChild(rowCam(cfg)));
   list.querySelectorAll('.btnOpen').forEach(b=>b.onclick=()=>openWS(b.dataset.cam));
   list.querySelectorAll('.btnClose').forEach(b=>b.onclick=()=>closeWS(b.dataset.cam));
   list.querySelectorAll('.btnDel').forEach(b=>b.onclick=()=>deleteCamera(b.dataset.cam));
 }
 
 function openWS(cam_id){
-  const token = localStorage.getItem(tokenKey);
-  if(!token){ alert('Inicia sesión primero'); return; }
   if(!$('#card-'+cam_id)) $('#camGrid').appendChild(camCard(cam_id));
-  if(wsMap.has(cam_id)){ return; }
-  const url = wsBase()+`/ws/stream/${encodeURIComponent(cam_id)}?token=${encodeURIComponent(token)}`;
+  if(wsMap.has(cam_id)) return;
+  const url = wsBase()+`/ws/stream/${encodeURIComponent(cam_id)}`;
   const ws = new WebSocket(url);
   ws.onopen = ()=>{ $('#srv').textContent = url; setDot(cam_id, '#18a558'); };
   ws.onclose = ()=>{ setDot(cam_id, '#666'); wsMap.delete(cam_id); };
@@ -208,25 +168,19 @@ function openWS(cam_id){
       const msg = JSON.parse(ev.data);
       if(msg.type==='frame'){
         const img = $('#img-'+msg.cam_id);
-        if(img) img.src = 'data:image/jpeg;base64,'+msg.jpg_b64;
-
-        // --- CORREGIDO: usar p_vid/p_win con fallback a prob
+        if(img && msg.jpg_b64) img.src = 'data:image/jpeg;base64,'+msg.jpg_b64;
         const pvid = (msg.p_vid ?? msg.pwin ?? msg.p_win ?? msg.prob ?? 0);
         const pwin = (msg.p_win ?? msg.pwin ?? msg.prob ?? null);
-
         $('#prob-'+msg.cam_id).textContent = Number(pvid).toFixed(3);
         $('#ts-'+msg.cam_id).textContent = new Date((msg.ts||Date.now()/1000)*1000).toLocaleTimeString();
-
         const meta = $('#meta-'+msg.cam_id);
         if(meta) meta.textContent = (pwin!=null)
           ? `p_win: ${Number(pwin).toFixed(3)} · p_vid: ${Number(pvid).toFixed(3)}`
           : `prob: ${Number(pvid).toFixed(3)}`;
-
         const st = $('#state-'+msg.cam_id);
         if(msg.on){ st.textContent='ALERTA'; st.className='alert'; }
         else { st.textContent='OK'; st.className='ok'; }
       } else if(msg.type==='alert'){
-        // El server manda alertas con {prob, ts}. Mantengo compatibilidad.
         addAlert(msg);
       } else if(msg.type==='error'){
         addAlert({cam_id: msg.cam_id||'?', prob:0, ts: Date.now()/1000});
@@ -246,15 +200,16 @@ function setDot(cam_id, color){
 }
 
 // Wire UI
-$('#btnLogin').onclick = login;
-$('#btnLogout').onclick = ()=>{ logout(); };
+$('#btnLogout').onclick = logout;
 $('#btnAdd').onclick = addCamera;
 $('#btnReload').onclick = loadCameras;
 
-// Init
+// Init: exige sesión
 (function init(){
+  const token = localStorage.getItem(tokenKey);
   const email = localStorage.getItem(emailKey);
-  setWho(email);
+  if(!token){ window.location.href = '/static/login.html'; return; }
+  setWho(email || '');
   loadCameras();
 })();
 </script>
