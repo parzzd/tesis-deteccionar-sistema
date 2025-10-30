@@ -1,7 +1,8 @@
 # uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
-import os, time, json, base64, asyncio, collections
+import os, time, json, base64, asyncio
 from typing import Dict, Any, Optional, Set, List
 from pathlib import Path
+from collections import deque
 
 import numpy as np
 import joblib
@@ -9,18 +10,15 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from ultralytics import YOLO
 from dotenv import load_dotenv
 
 load_dotenv()
-#venv\Scripts\python -m uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
+# venv\Scripts\python -m uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
 
-# =========================
-# RUTAS Y ARTEFACTOS
-# =========================
 ROOT_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = (ROOT_DIR / "static").resolve()
 
@@ -38,9 +36,8 @@ TOPK         = int(os.environ.get("POSE_TOPK", "4"))
 
 # Ventanas (debe calzar con el modelo)
 SEQ_LEN      = 32
-STRIDE       = 1
 CONF_MIN     = 0.10
-MIN_VIS_FRAC = 0.50
+MIN_VIS_FRAC = 0.30
 
 # Fusión (Keras + LGBM opcional)
 FUSION_W    = 0.50     # 0→solo Keras, 1→solo LGBM
@@ -48,10 +45,12 @@ POOL_METHOD = "topk"   # max|mean|topk
 TOPK_FRAC   = 0.20
 HYST_GAP    = 0.10     # thr_off = thr_on - gap
 
-# ===== Preview (no afecta inferencia) =====
-SEND_FPS      = float(os.environ.get("SEND_FPS", "10"))   # fps de envío al browser
-FRAME_WIDTH   = int(os.environ.get("FRAME_WIDTH", "720")) # ancho máx del frame enviado
-JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "65")) # 50–80 recomendado
+# Preview (NO afecta inferencia)
+SEND_FPS      = float(os.environ.get("SEND_FPS", "10"))
+FRAME_WIDTH   = int(os.environ.get("FRAME_WIDTH", "720"))
+JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "65"))
+DRAW_OVERLAY  = os.getenv("DRAW_OVERLAY", "1") != "0"
+VIDEO_MAX_SCORES = int(os.getenv("VIDEO_MAX_SCORES", "900"))  # ~1–2 min
 
 # =========================
 # UTILS (pose → 51f, pooling, etc.)
@@ -72,7 +71,8 @@ def pool_frame_to_51(kps_f: np.ndarray, W: int, H: int) -> np.ndarray:
                 out[j, 0] = np.clip(x / max(W, 1), 0.0, 1.0)
                 out[j, 1] = np.clip(y / max(H, 1), 0.0, 1.0)
                 out[j, 2] = float(np.clip(c, 0.0, 1.0))
-    return out.reshape(-1)
+    v = out.reshape(-1)
+    return np.nan_to_num(v, nan=0.0)
 
 def frame_visible(kps_f: np.ndarray, conf_min: float = CONF_MIN) -> bool:
     if kps_f is None or kps_f.size == 0:
@@ -141,10 +141,8 @@ def home():
     idx = STATIC_DIR / "login.html"
     if idx.exists():
         return FileResponse(str(idx))
-    # fallback si no existe
     return JSONResponse({"ok": True, "msg": "sube app/static/login.html"})
 
-# Accesos directos útiles
 @app.get("/login-page")
 def login_page():
     f = STATIC_DIR / "login.html"
@@ -181,9 +179,7 @@ def login(data: LoginRequest):
     if not SIC_EMAIL or not SIC_PASSWORD:
         raise HTTPException(status_code=500, detail="Credenciales no configuradas en .env")
     if data.email != SIC_EMAIL or data.password != SIC_PASSWORD:
-        # el front redirige a /static/login_fail.html
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    # éxito: el front va a /static/index.html
     return TokenResponse(access_token="sicher_dummy_token")
 
 # =========================
@@ -220,9 +216,9 @@ class CameraWorker:
         self.running = False
         self.task: Optional[asyncio.Task] = None
 
-        self.win_feats: collections.deque = collections.deque(maxlen=SEQ_LEN)  # (51,)
-        self.win_vis:   collections.deque = collections.deque(maxlen=SEQ_LEN)  # bool
-        self.video_scores: List[float] = []
+        self.win_feats: deque = deque(maxlen=SEQ_LEN)     # (51,)
+        self.win_vis:   deque = deque(maxlen=SEQ_LEN)     # bool
+        self.video_scores: deque = deque(maxlen=VIDEO_MAX_SCORES)
         self.on_state = False
 
         self.W, self.H = None, None
@@ -247,10 +243,15 @@ class CameraWorker:
         return Xn.reshape(1, T, F).astype("float32")
 
     def _predict_window(self, Xw: np.ndarray) -> float:
+        # Keras
         X = Xw[np.newaxis, ...]
         X = self._norm_apply(X)
         p_keras = float(KERAS.predict(X, verbose=0).ravel()[0])
+        if not np.isfinite(p_keras):
+            p_keras = 0.0
+        p_keras = float(np.clip(p_keras, 0.0, 1.0))
 
+        # LGBM (si existe)
         if LGBM is None or FUSION_W <= 0.0:
             return p_keras
 
@@ -266,12 +267,19 @@ class CameraWorker:
                                    a.max(0).ravel()], axis=0)
 
         feat = np.concatenate([stats(xy[...,0]), stats(xy[...,1]), stats(v)], axis=0).astype(np.float32)
-        p_lgbm = float(LGBM.predict_proba(feat.reshape(1, -1))[:, 1][0])
+        feat = np.nan_to_num(feat, nan=0.0)
+        try:
+            p_lgbm = float(LGBM.predict_proba(feat.reshape(1, -1))[:, 1][0])
+            if not np.isfinite(p_lgbm): p_lgbm = 0.0
+            p_lgbm = float(np.clip(p_lgbm, 0.0, 1.0))
+        except Exception as e:
+            print("[WARN] LGBM predict err:", e)
+            p_lgbm = p_keras
 
         return (1.0 - FUSION_W) * p_keras + FUSION_W * p_lgbm
 
     async def run(self):
-        import cv2
+        import cv2, traceback
         cap = None
         try:
             # abrir fuente
@@ -296,55 +304,77 @@ class CameraWorker:
                     await self.broadcast({"type": "error", "msg": "eof"})
                     break
 
-                # ===== INFERENCIA EN FRAME ORIGINAL =====
                 frame_full = frame
-
-                res = POSE.predict(
-                    frame_full, imgsz=IMGSZ, conf=CONF_POSE, iou=IOU_POSE,
-                    verbose=False, half=False
-                )[0]
-
-                kps_f = None
-                if res.keypoints is not None and res.keypoints.xy is not None and res.keypoints.xy.shape[0] > 0:
-                    xy = res.keypoints.xy.detach().cpu().numpy()  # (P,17,2)
-                    c  = getattr(res.keypoints, "confidence", None) or getattr(res.keypoints, "conf", None)
-                    if c is not None:
-                        c = c.detach().cpu().numpy()
-                    else:
-                        c = np.ones(xy.shape[:2], dtype=np.float32)
-                    order = np.argsort(-c.mean(axis=1))
-                    P = min(len(order), TOPK)
-                    xy = xy[order[:P]]
-                    c  = c[order[:P]]
-                    kps_f = np.concatenate([xy, c[..., None]], axis=-1).astype(np.float32)  # (P,17,3)
-
-                feat51 = pool_frame_to_51(kps_f, self.W, self.H)
-                vis = frame_visible(kps_f, CONF_MIN)
-
-                self.win_feats.append(feat51)
-                self.win_vis.append(1.0 if vis else 0.0)
-
                 p_win = 0.0
                 p_vid = 0.0
 
-                if len(self.win_feats) == SEQ_LEN:
-                    vis_frac = np.mean(self.win_vis)
-                    if vis_frac >= MIN_VIS_FRAC:
-                        Xw = np.stack(self.win_feats, axis=0)  # (T,51)
-                        p_win = self._predict_window(Xw)
-                        self.video_scores.append(p_win)
-                        p_vid = pool_scores(self.video_scores, pool=POOL_METHOD, topk_frac=TOPK_FRAC)
+                try:
+                    res = POSE.predict(
+                        frame_full, imgsz=IMGSZ, conf=CONF_POSE, iou=IOU_POSE,
+                        verbose=False, half=False
+                    )[0]
 
-                        # histéresis
-                        if not self.on_state and p_vid >= THR_ON:
-                            self.on_state = True
-                            await self.broadcast({"type": "alert", "cam_id": self.cam_id, "prob": float(p_vid), "ts": time.time()})
-                        elif self.on_state and p_vid <= THR_OFF:
-                            self.on_state = False
+                    kps_f = None
+                    if (res.keypoints is not None and
+                        getattr(res.keypoints, "xy", None) is not None and
+                        res.keypoints.xy.shape[0] > 0):
+                        xy = res.keypoints.xy.detach().cpu().numpy()     # (P,17,2)
+                        c  = (getattr(res.keypoints, "confidence", None) or
+                              getattr(res.keypoints, "conf", None))
+                        if c is not None:
+                            c = c.detach().cpu().numpy()                 # (P,17)
+                        else:
+                            c = np.ones(xy.shape[:2], dtype=np.float32)
+
+                        # saneo NaNs
+                        if not np.isfinite(xy).all(): xy = np.nan_to_num(xy, nan=0.0)
+                        if not np.isfinite(c).all():  c  = np.nan_to_num(c,  nan=0.0)
+
+                        order = np.argsort(-c.mean(axis=1))
+                        P = int(min(len(order), TOPK))
+                        if P > 0:
+                            xy = xy[order[:P]]
+                            c  = c[order[:P]]
+                            kps_f = np.concatenate([xy, c[..., None]], axis=-1).astype(np.float32)  # (P,17,3)
+
+                    feat51 = pool_frame_to_51(kps_f, self.W, self.H)  # (51,)
+                    vis = frame_visible(kps_f, CONF_MIN)
+
+                    self.win_feats.append(feat51)
+                    self.win_vis.append(1.0 if vis else 0.0)
+
+                    if len(self.win_feats) == SEQ_LEN:
+                        vis_frac = float(np.mean(self.win_vis)) if len(self.win_vis) else 0.0
+                        if vis_frac >= MIN_VIS_FRAC:
+                            Xw = np.stack(self.win_feats, axis=0)  # (T,51)
+                            Xw = np.nan_to_num(Xw, nan=0.0)
+                            try:
+                                p_win = float(self._predict_window(Xw))
+                                if not np.isfinite(p_win): p_win = 0.0
+                                p_win = float(np.clip(p_win, 0.0, 1.0))
+                                self.video_scores.append(p_win)
+                                p_vid = pool_scores(list(self.video_scores), pool=POOL_METHOD, topk_frac=TOPK_FRAC)
+                            except Exception as e:
+                                print("[WARN] predict_window err:", e)
+                                traceback.print_exc()
+                                p_win = 0.0; p_vid = 0.0
+
+                            # histéresis
+                            if not self.on_state and p_vid >= THR_ON:
+                                self.on_state = True
+                                await self.broadcast({"type": "alert", "cam_id": self.cam_id,
+                                                      "prob": float(p_vid), "ts": time.time()})
+                            elif self.on_state and p_vid <= THR_OFF:
+                                self.on_state = False
+
+                except Exception as e:
+                    print("[WARN] pose/pipeline err:", e)
+                    import traceback as tb; tb.print_exc()
+                    p_win = 0.0; p_vid = 0.0
 
                 # ===== PREVIEW (SÓLO ENVÍO) =====
                 try:
-                    show = res.plot() if res is not None else frame_full
+                    show = res.plot() if (DRAW_OVERLAY and 'res' in locals() and res is not None) else frame_full
                 except Exception:
                     show = frame_full
 
@@ -361,6 +391,7 @@ class CameraWorker:
                 encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
                 ok_enc, buf = await asyncio.to_thread(cv2.imencode, ".jpg", show_small, encode_params)
                 if not ok_enc:
+                    await asyncio.sleep(0.005)
                     continue
 
                 now = time.time()
@@ -376,7 +407,7 @@ class CameraWorker:
 
                 await self.broadcast(payload)
 
-                # FPS del preview (telemetría local)
+                # telemetría local
                 fps_smooth = 0.9 * fps_smooth + 0.1 * (1.0 / max(1e-6, time.time() - t0)); t0 = time.time()
                 await asyncio.sleep(0.005)
         finally:
@@ -384,6 +415,7 @@ class CameraWorker:
                 cap.release()
 
     async def broadcast(self, msg: Dict[str, Any]):
+        # drop rápido de clientes muertos
         for ws in list(self.clients):
             try:
                 await ws.send_json(msg)
@@ -413,7 +445,6 @@ async def ws_stream(websocket: WebSocket, cam_id: str):
         await worker.start()
 
     worker.clients.add(websocket)
-
     try:
         while True:
             _ = await websocket.receive_text()  # reservado
