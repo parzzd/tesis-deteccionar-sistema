@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>VigilIA – Iniciar sesión</title>
+<title>Sistema de Deteccion</title>
 <style>
   :root{--bg:#0b0f17;--panel:#0f1522;--card:#0e1421;--mut:#9aa4b2;--txt:#e6edf3;--b:#1e2636;--btn:#335cce}
   *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
@@ -19,7 +19,6 @@
   .mut{color:var(--mut);font-size:13px}
   .btn{width:100%;padding:12px 14px;border:none;border-radius:12px;background:var(--btn);color:#fff;cursor:pointer;font-weight:600}
   .btn:disabled{opacity:.6;cursor:not-allowed}
-  .hint{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--mut);font-size:12px}
   .foot{margin-top:10px;text-align:right}
   a{color:#8fb3ff;text-decoration:none}
   .err{display:none;margin-bottom:10px;background:#3a1116;border:1px solid #6b1f28;color:#ffb4b8;padding:10px;border-radius:10px;font-size:13px}
@@ -30,11 +29,12 @@
   <div class="shell">
     <div class="logo">
       <div class="badge">🛡️</div>
-      <h1>VigilIA</h1>
+      <h1>Tésis de Detección</h1>
     </div>
 
     <h2>Iniciar sesión</h2>
     <div id="err" class="err"></div>
+    <div id="tries" class="text-sm text-gray-500 mt-2" style="display:none;"></div>
 
     <label>Nombre de usuario</label>
     <input id="email" class="in" placeholder="usuario@vigilia.io" autocomplete="username"/>
@@ -51,51 +51,85 @@
 
     <div style="margin-top:14px"><button id="btn" class="btn">Iniciar sesión</button></div>
 
-    <div class="hint">
-      <input type="checkbox" id="twofa" disabled style="accent-color:#5f89ff"/>
-      <label for="twofa">Iniciar sesión con verificación en dos pasos</label>
-    </div>
 
     <div class="foot"><span class="mut">Español ▾</span></div>
   </div>
 </div>
 
 <script>
-const $ = s=>document.querySelector(s);
-const tokenKey='sicher.token', emailKey='sicher.email';
+const $ = s => document.querySelector(s);
+const tokenKey = 'sicher.token', emailKey = 'sicher.email';
 
-// si venimos de fallo, mostrar mensaje
-const qp = new URLSearchParams(location.search);
-if(qp.get('err')){
-  const e=$('#err'); e.textContent='Credenciales inválidas. Intenta nuevamente.'; e.style.display='block';
-}
+// Recuperar email recordado
 const remembered = localStorage.getItem(emailKey);
-if(remembered){ $('#email').value = remembered; $('#remember').checked = true; }
+if (remembered) {
+  $('#email').value = remembered;
+  $('#remember').checked = true;
+}
 
-async function doLogin(){
-  const btn=$('#btn'); btn.disabled=true;
+async function doLogin() {
+  const btn = $('#btn');
+  const errBox = $('#err');
+  const triesBox = $('#tries');
   const email = $('#email').value.trim();
   const password = $('#password').value;
-  try{
-    const res = await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
-    if(!res.ok){
-      location.href = '/static/login_fail.html';
+
+  errBox.style.display = 'none';
+  triesBox.style.display = 'none';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    // 🔒 Caso: bloqueado temporalmente
+    if (res.status === 403 && data.blocked) {
+      errBox.textContent = data.error || 'Usuario bloqueado. Intenta más tarde.';
+      errBox.style.display = 'block';
+      window.location.href = "/static/login_fail.html";
       return;
     }
-    const data = await res.json();
-    if($('#remember').checked) localStorage.setItem(emailKey, email); else localStorage.removeItem(emailKey);
-    // OK → ir al dashboard
-    localStorage.setItem('sicher.token', data.access_token);
+
+    // ⚠️ Caso: error de autenticación
+    if (!res.ok) {
+      errBox.textContent = data.error || 'Credenciales inválidas.';
+      errBox.style.display = 'block';
+
+      if (data.attempts && data.max_attempts)
+        triesBox.textContent = `Intento ${data.attempts} de ${data.max_attempts}`;
+      triesBox.style.display = 'block';
+
+      btn.disabled = false;
+      return;
+    }
+
+    // ✅ Caso: login exitoso
+    if ($('#remember').checked)
+      localStorage.setItem(emailKey, email);
+    else
+      localStorage.removeItem(emailKey);
+
+    localStorage.removeItem('failedAttempts');
+    localStorage.setItem(tokenKey, data.access_token);
     localStorage.setItem('sicher.email', email);
+
     window.location.href = '/static/index.html';
-  }catch(err){
-    location.href = '/static/login_fail.html';
-  }finally{
-    btn.disabled=false;
+  } catch (err) {
+    console.error(err);
+    errBox.textContent = 'Error de conexión con el servidor.';
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
   }
 }
-$('#btn').onclick=doLogin;
-document.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin();});
+
+$('#btn').onclick = doLogin;
+document.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 </script>
 </body>
 </html>

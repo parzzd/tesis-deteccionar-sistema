@@ -4,20 +4,25 @@ from typing import Dict, Any, Optional, Set, List
 from pathlib import Path
 from collections import deque
 
+from datetime import datetime, timedelta
+from fastapi.responses import JSONResponse
 import numpy as np
 import joblib
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException,Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from ultralytics import YOLO
 from dotenv import load_dotenv
-
-load_dotenv()
 # venv\Scripts\python -m uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+# --- LOGIN SIMPLE (.env) ---
+SIC_EMAIL    = os.getenv("SIC_EMAIL", "")
+SIC_PASSWORD = os.getenv("SIC_PASSWORD", "")
 
 ROOT_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = (ROOT_DIR / "static").resolve()
@@ -51,7 +56,9 @@ FRAME_WIDTH   = int(os.environ.get("FRAME_WIDTH", "720"))
 JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "65"))
 DRAW_OVERLAY  = os.getenv("DRAW_OVERLAY", "1") != "0"
 VIDEO_MAX_SCORES = int(os.getenv("VIDEO_MAX_SCORES", "900"))  # ~1–2 min
-
+FAILED_ATTEMPTS: dict[str, dict] = {}
+MAX_ATTEMPTS = 3
+BLOCK_TIME_MINUTES = 5
 # =========================
 # UTILS (pose → 51f, pooling, etc.)
 # =========================
@@ -162,9 +169,7 @@ def dashboard():
 def health():
     return {"ok": True}
 
-# --- LOGIN SIMPLE (.env) ---
-SIC_EMAIL    = os.getenv("SIC_EMAIL", "")
-SIC_PASSWORD = os.getenv("SIC_PASSWORD", "")
+
 
 class LoginRequest(BaseModel):
     email: str
@@ -175,11 +180,58 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 @app.post("/login", response_model=TokenResponse)
-def login(data: LoginRequest):
-    if not SIC_EMAIL or not SIC_PASSWORD:
-        raise HTTPException(status_code=500, detail="Credenciales no configuradas en .env")
+def login(data: LoginRequest, request: Request):
+    key = data.email.strip().lower()
+    now = datetime.now()
+
+    if not key:
+        return JSONResponse(
+            {"error": "El correo no puede estar vacío.", "blocked": False},
+            status_code=400
+        )
+
+    # obtener o inicializar registro
+    info = FAILED_ATTEMPTS.get(key, {"count": 0, "blocked_until": None})
+
+    # limpiar bloqueo expirado
+    if info["blocked_until"] and now >= info["blocked_until"]:
+        info = {"count": 0, "blocked_until": None}
+        FAILED_ATTEMPTS[key] = info
+
+    # Si está bloqueado
+    if info["blocked_until"] and now < info["blocked_until"]:
+        remaining_sec = int((info["blocked_until"] - now).total_seconds())
+        remaining_min = remaining_sec // 60
+        return JSONResponse(
+            {
+                "error": f"Usuario bloqueado. Intenta nuevamente en {remaining_min} minuto(s).",
+                "blocked": True,
+                "attempts": info["count"],
+                "max_attempts": MAX_ATTEMPTS,
+                "blocked_until": info["blocked_until"].isoformat()
+            },
+            status_code=403
+        )
+
+    # Validar credenciales
     if data.email != SIC_EMAIL or data.password != SIC_PASSWORD:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+        info["count"] += 1
+        if info["count"] >= MAX_ATTEMPTS:
+            info["blocked_until"] = now + timedelta(minutes=BLOCK_TIME_MINUTES)
+
+        FAILED_ATTEMPTS[key] = info
+        return JSONResponse(
+            {
+                "error": "Credenciales inválidas.",
+                "attempts": info["count"],
+                "max_attempts": MAX_ATTEMPTS,
+                "blocked": info["count"] >= MAX_ATTEMPTS
+            },
+            status_code=401 if info["count"] < MAX_ATTEMPTS else 403
+        )
+
+    # login correcto → reset contador
+    FAILED_ATTEMPTS[key] = {"count": 0, "blocked_until": None}
     return TokenResponse(access_token="sicher_dummy_token")
 
 # =========================
