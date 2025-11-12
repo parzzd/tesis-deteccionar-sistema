@@ -27,10 +27,10 @@ SIC_PASSWORD = os.getenv("SIC_PASSWORD", "")
 ROOT_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = (ROOT_DIR / "static").resolve()
 
-KERAS_MODEL = Path("./models_mix/mix_cnn_lstm_T32_F78.keras")
-NORM_STATS  = Path("./models_mix/mix_cnn_lstm_T32_F78_norm_stats.npz")
-THRESH_JSON = Path("./models_mix/mix_cnn_lstm_T32_F78_threshold.json")
-LGBM_PKL    = Path("./models_mix/lgbm_model.pkl")  # opcional
+KERAS_MODEL = Path("./models_mix/mix_cnn_lstm_T32_F51.keras")
+NORM_STATS  = Path("./models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz")
+THRESH_JSON = Path("./models_mix/mix_cnn_lstm_T32_F51_threshold.json")
+LGBM_PKL    = Path("./models_mix/lgbm_model_F51.pkl")  # opcional
 
 # Pose
 POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11m-pose.pt")
@@ -50,6 +50,7 @@ POOL_METHOD = "topk"   # max|mean|topk
 TOPK_FRAC   = 0.20
 HYST_GAP    = 0.10     # thr_off = thr_on - gap
 
+# Preview (NO afecta inferencia)
 SEND_FPS      = float(os.environ.get("SEND_FPS", "10"))
 FRAME_WIDTH   = int(os.environ.get("FRAME_WIDTH", "720"))
 JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "65"))

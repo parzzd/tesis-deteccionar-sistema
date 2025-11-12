@@ -12,10 +12,10 @@ from tensorflow.keras.models import load_model
 from ultralytics import YOLO
 
 # =========================
-# CONFIG (edita aquí)
+# CONFIG
 # =========================
 MODELS_DIR   = Path("./models_mix")
-VIDEO_IN     = Path(r"C:\Users\Usuario\Documents\GitHub\tesis-deteccionar-sistema\V_27.mp4")
+VIDEO_IN     = Path(r"C:\Users\Usuario\Documents\GitHub\tesis-deteccionar-sistema\Normal_Videos_781_x264.mp4")
 VIDEO_OUT    = Path(r"C:\Users\Usuario\Documents\GitHub\tesis-deteccionar-sistema\V_222.mp4")
 CSV_OUT      = VIDEO_OUT.with_suffix(".csv")
 
@@ -29,55 +29,61 @@ TOPK_PERSONS = 4
 SEQ_LEN      = 32
 CONF_MIN     = 0.10
 MIN_VIS_FRAC = 0.30
-HYST_GAP     = 0.10    # thr_off = thr_on - gap
-STRIDE       = 1       # procesa 1 frame cada STRIDE (2 = saltea 1)
+HYST_GAP     = 0.10
+STRIDE       = 1
 
-# Fusión con LGBM (si existe models_mix/lgbm_model.pkl)
-FUSION_W     = 0.50    # 0→solo Keras, 1→solo LGBM
-
-# Pooling de scores a nivel video
+# Fusión con LGBM (si existe)
+FUSION_W     = 0.50
 POOL_METHOD  = "topk"  # "max" | "mean" | "topk"
 TOPK_FRAC    = 0.20
 
 # =========================
 # Rutas de artefactos
 # =========================
-KERAS_FILE = MODELS_DIR / "mix_cnn_lstm_T32_F51.keras"
-STATS_FILE = MODELS_DIR / "mix_cnn_lstm_T32_F51_norm_stats.npz"
-THR_FILE   = MODELS_DIR / "mix_cnn_lstm_T32_F51_threshold.json"
+KERAS_FILE = Path("./models_mix/mix_enhanced_T32_F78.keras")
+STATS_FILE = Path("./models_mix/mix_enhanced_T32_F78_norm_stats.npz")
+THR_FILE   = Path("./models_mix/mix_enhanced_T32_F78_threshold.json")
 LGBM_FILE  = MODELS_DIR / "lgbm_model.pkl"
 
+# =========================
 # Warnings ruidosos
+# =========================
 warnings.filterwarnings("ignore", category=UserWarning, module="keras")
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 # =========================
 # Utilidades
 # =========================
-def pool_frame_to_51(kps_f: np.ndarray, W: int, H: int) -> np.ndarray:
-    """kps_f: (P,17,3) -> (51,) normalizado por W,H; pooling por joint."""
-    out = np.zeros((17, 3), dtype=np.float32)
+def pool_frame_to_78(kps_f, W, H):
+    """
+    Extrae 78 features (26 keypoints × [x, y, conf]) normalizados entre 0 y 1.
+    Si algún punto no está presente, devuelve 0.
+    """
+    out = np.zeros((26, 3), np.float32)
     if kps_f is None or kps_f.size == 0:
         return out.reshape(-1)
+
     conf_j = np.nan_to_num(kps_f[..., 2], nan=0.0)
-    P = kps_f.shape[0]
-    for j in range(17):
-        if P == 0: break
-        idx = int(np.argmax(conf_j[:, j]))
-        c = conf_j[idx, j]
-        if c > 0:
-            x, y, _ = kps_f[idx, j, :]
+
+    for j in range(26):
+        if conf_j.shape[0] == 0:
+            continue
+        idx = np.argmax(conf_j[:, j])
+        if conf_j[idx, j] > 0:
+            x, y, c = kps_f[idx, j, :]
             if np.isfinite(x) and np.isfinite(y):
-                out[j, 0] = np.clip(x / max(W, 1), 0.0, 1.0)
-                out[j, 1] = np.clip(y / max(H, 1), 0.0, 1.0)
-                out[j, 2] = float(np.clip(c, 0.0, 1.0))
-    return out.reshape(-1)
+                out[j, 0] = np.clip(x / max(W, 1), 0, 1)
+                out[j, 1] = np.clip(y / max(H, 1), 0, 1)
+                out[j, 2] = float(np.clip(c, 0, 1))
+    return out.reshape(-1)  # (78,)
+
 
 def frame_visible(kps_f: np.ndarray, conf_min: float = CONF_MIN) -> bool:
     if kps_f is None or kps_f.size == 0:
         return False
     conf = np.nan_to_num(kps_f[..., 2], nan=0.0)
     return bool((conf >= conf_min).any())
+
 
 def pool_scores(scores: List[float], pool: str = "topk", topk_frac: float = 0.2) -> float:
     if not scores:
@@ -88,13 +94,13 @@ def pool_scores(scores: List[float], pool: str = "topk", topk_frac: float = 0.2)
     k = max(1, int(len(arr) * topk_frac))
     return float(np.partition(arr, -k)[-k:].mean())
 
+
 def build_tabular_features(Xw: np.ndarray) -> np.ndarray:
     """
-    Genera features tabulares desde Xw (T,51) reinterpretando como (T,17,3):
-    - stats de x, y y velocidad (mean,std,min,max) → vector (actualmente 204 dims).
-    OJO: debe coincidir con el featurizador usado en el entrenamiento del LGBM.
+    Genera features tabulares desde Xw (T,78) reinterpretando como (T,26,3):
+    Calcula estadísticas de movimiento (x, y, velocidad).
     """
-    x3 = Xw.reshape(Xw.shape[0], 17, 3)
+    x3 = Xw.reshape(Xw.shape[0], 26, 3)
     xy = x3[..., :2]
     dx = np.diff(xy, axis=0, prepend=xy[0:1])
     v  = np.linalg.norm(dx, axis=-1)
@@ -105,10 +111,10 @@ def build_tabular_features(Xw: np.ndarray) -> np.ndarray:
                                a.min(0).ravel(),
                                a.max(0).ravel()], axis=0)
     feat = np.concatenate([stats(xy[...,0]), stats(xy[...,1]), stats(v)], axis=0).astype(np.float32)
-    return feat  # p.ej. 204 dims con este diseño
+    return feat
+
 
 def lgbm_expected_features(lgbm) -> int | None:
-    """Intenta obtener cuántas features espera el LGBM."""
     exp = getattr(lgbm, "n_features_in_", None)
     if exp is not None:
         return int(exp)
@@ -120,6 +126,7 @@ def lgbm_expected_features(lgbm) -> int | None:
     except Exception:
         pass
     return None
+
 
 def load_artifacts(models_dir: Path, pose_w: str):
     if not KERAS_FILE.exists(): raise FileNotFoundError(KERAS_FILE)
@@ -149,28 +156,26 @@ def load_artifacts(models_dir: Path, pose_w: str):
     print(f"[BOOT] Keras={KERAS_FILE} | THR_ON={THR_ON:.2f} THR_OFF={THR_OFF:.2f} | T={SEQ_LEN} | LGBM={'ON' if lgbm is not None else 'OFF'}")
     return keras_model, MU, SD, THR_ON, THR_OFF, lgbm, pose
 
+
 def norm_apply(X, MU, SD):
     T, F = X.shape[1], X.shape[2]
     X2 = X.reshape(-1, F)
     Xn = (X2 - MU) / (SD + 1e-6)
     return Xn.reshape(1, T, F).astype("float32")
 
+
 def predict_window(Xw, keras_model, MU, SD, lgbm=None, fusion_w=0.5):
-    # --- Keras ---
     X = Xw[np.newaxis, ...]
     X = norm_apply(X, MU, SD)
     p_keras = float(keras_model.predict(X, verbose=0).ravel()[0])
 
-    # --- LGBM (opcional) ---
     if lgbm is None or fusion_w <= 0.0:
         return p_keras
 
-    feat = build_tabular_features(Xw)              # tu featurizador actual
-    expected = lgbm_expected_features(lgbm)        # lo que espera el modelo
+    feat = build_tabular_features(Xw)
+    expected = lgbm_expected_features(lgbm)
     if expected is not None and feat.shape[0] != expected:
-        # Fallback limpio (no romper): usa solo Keras
-        print(f"[WARN] LGBM mismatch: generas {feat.shape[0]} feats y el modelo espera {expected}. "
-              f"Usaré solo Keras en esta corrida.")
+        print(f"[WARN] LGBM mismatch: generas {feat.shape[0]} feats y el modelo espera {expected}. Uso solo Keras.")
         return p_keras
 
     try:
@@ -181,8 +186,9 @@ def predict_window(Xw, keras_model, MU, SD, lgbm=None, fusion_w=0.5):
 
     return (1.0 - fusion_w) * p_keras + fusion_w * p_lgbm
 
+
 # =========================
-# Inferencia sobre video
+# INFERENCIA VIDEO
 # =========================
 def run_video():
     KERAS, MU, SD, THR_ON, THR_OFF, LGBM, POSE = load_artifacts(MODELS_DIR, POSE_WEIGHTS)
@@ -198,8 +204,8 @@ def run_video():
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     vw = cv2.VideoWriter(str(VIDEO_OUT), fourcc, fps, (W, H), True)
 
-    win_feats = collections.deque(maxlen=SEQ_LEN)  # (51,)
-    win_vis   = collections.deque(maxlen=SEQ_LEN)  # bool
+    win_feats = collections.deque(maxlen=SEQ_LEN)
+    win_vis   = collections.deque(maxlen=SEQ_LEN)
     video_scores: List[float] = []
     on_state = False
 
@@ -215,31 +221,28 @@ def run_video():
                 break
             fidx += 1
             if STRIDE > 1 and (fidx % STRIDE != 0):
-                # mantén sincronía de tiempo en el MP4 de salida
                 vw.write(frame)
                 continue
 
-            # --- Pose ---
             res = POSE.predict(frame, imgsz=IMGSZ, conf=CONF_POSE, iou=IOU_POSE, verbose=False, half=False)[0]
 
             kps_f = None
             if res.keypoints is not None and res.keypoints.xy is not None and res.keypoints.xy.shape[0] > 0:
-                xy = res.keypoints.xy.detach().cpu().numpy()  # (P,17,2)
+                xy = res.keypoints.xy.detach().cpu().numpy()  # (P,26,2)
                 c  = getattr(res.keypoints, "confidence", None) or getattr(res.keypoints, "conf", None)
                 if c is not None:
-                    c = c.detach().cpu().numpy()              # (P,17)
+                    c = c.detach().cpu().numpy()
                 else:
                     c = np.ones(xy.shape[:2], dtype=np.float32)
                 order = np.argsort(-c.mean(axis=1))
                 P = min(len(order), TOPK_PERSONS)
                 xy = xy[order[:P]]
                 c  = c[order[:P]]
-                kps_f = np.concatenate([xy, c[..., None]], axis=-1).astype(np.float32)  # (P,17,3)
+                kps_f = np.concatenate([xy, c[..., None]], axis=-1).astype(np.float32)  # (P,26,3)
 
-            # --- Ventana ---
-            feat51 = pool_frame_to_51(kps_f, W, H)
+            feat78 = pool_frame_to_78(kps_f, W, H)
             vis = frame_visible(kps_f, CONF_MIN)
-            win_feats.append(feat51)
+            win_feats.append(feat78)
             win_vis.append(1.0 if vis else 0.0)
 
             p_win = 0.0
@@ -247,7 +250,7 @@ def run_video():
             if len(win_feats) == SEQ_LEN:
                 vis_frac = np.mean(win_vis)
                 if vis_frac >= MIN_VIS_FRAC:
-                    Xw = np.stack(win_feats, axis=0)  # (T,51)
+                    Xw = np.stack(win_feats, axis=0)  # (T,78)
                     p_win = predict_window(Xw, KERAS, MU, SD, lgbm=LGBM, fusion_w=FUSION_W)
                     video_scores.append(p_win)
                     p_vid = pool_scores(video_scores, pool=POOL_METHOD, topk_frac=TOPK_FRAC)
@@ -257,7 +260,6 @@ def run_video():
                     elif on_state and p_vid <= THR_OFF:
                         on_state = False
 
-            # --- Render ---
             try:
                 show = res.plot() if res is not None else frame
             except Exception:
@@ -270,7 +272,6 @@ def run_video():
                             cv2.FONT_HERSHEY_DUPLEX, 1.1, (0,0,255), 3)
 
             vw.write(show)
-
             tsec = fidx / max(fps, 1e-6)
             csv_w.writerow([fidx, f"{tsec:.3f}", f"{p_win:.6f}", f"{p_vid:.6f}", int(on_state)])
 
@@ -279,8 +280,9 @@ def run_video():
     print(f"[DONE] Video: {VIDEO_OUT}")
     print(f"[DONE] CSV  : {CSV_OUT}")
 
+
 # =========================
-# Run
+# MAIN
 # =========================
 if __name__ == "__main__":
     run_video()
