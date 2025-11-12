@@ -34,18 +34,19 @@ def frame_visible(kps_f, conf_min=CONF_MIN):
     conf = np.nan_to_num(kps_f[...,2], nan=0.0)
     return bool((conf >= conf_min).any())
 
-def pool_frame_to_51(kps_f, W, H):
-    out = np.zeros((17,3), np.float32)
-    conf_j = np.nan_to_num(kps_f[...,2], nan=0.0)
-    for j in range(17):
+def pool_frame_to_kp(kps_f, W, H):
+    J = kps_f.shape[1]  # número de keypoints (17 o 26)
+    out = np.zeros((J, 3), np.float32)
+    conf_j = np.nan_to_num(kps_f[..., 2], nan=0.0)
+    for j in range(J):
         idx = np.argmax(conf_j[:, j]) if conf_j.shape[0] else None
         if idx is not None and conf_j[idx, j] > 0:
-            x,y,c = kps_f[idx, j, :]
+            x, y, c = kps_f[idx, j, :]
             if np.isfinite(x) and np.isfinite(y):
-                out[j,0] = np.clip(x/max(W,1),0,1)
-                out[j,1] = np.clip(y/max(H,1),0,1)
-                out[j,2] = float(np.clip(c,0,1))
-    return out.reshape(-1)  # (51,)
+                out[j, 0] = np.clip(x / max(W, 1), 0, 1)
+                out[j, 1] = np.clip(y / max(H, 1), 0, 1)
+                out[j, 2] = float(np.clip(c, 0, 1))
+    return out.reshape(-1)  # (J*3,)
 
 def video_to_windows(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
@@ -63,10 +64,11 @@ def video_to_windows(npz_path: Path):
     if meta.get("video_level_label",0)==1 and TRIM_BORDERS>0 and F>2*TRIM_BORDERS:
         y = y.copy(); y[:TRIM_BORDERS]=0; y[-TRIM_BORDERS:]=0
 
-    feats = np.zeros((F,51), np.float32)
+    J = kps.shape[2]  # número de joints (17 o 26)
+    feats = np.zeros((F, J * 3), np.float32)
     vis   = np.zeros((F,), np.float32)
     for t in range(F):
-        feats[t] = pool_frame_to_51(kps[t], W, H)
+        feats[t] = pool_frame_to_kp(kps[t], W, H)
         vis[t]   = 1.0 if frame_visible(kps[t]) else 0.0
 
     Xw, Yw = [], []
@@ -80,25 +82,31 @@ def video_to_windows(npz_path: Path):
     Yw = np.array(Yw, np.int64) if Yw else np.zeros((0,), np.int64)
     return Xw, Yw, npz_path.name, npz_path.parent.name
 
-# featurizador tabular desde (T,51)
 PAIR_DISTS = [(5,6),(9,10),(0,9),(0,10),(11,12),(15,16)]
-def _stats(a):  # (T,J)
+def _stats(a):  
     return np.concatenate([a.mean(0), a.std(0), a.min(0), a.max(0)], axis=0)
 
-def featurize_T51(X_win: np.ndarray) -> np.ndarray:
+def featurize_TK(X_win: np.ndarray) -> np.ndarray:
     T = X_win.shape[0]
-    xyz = X_win.reshape(T,17,3)
-    x,y,c = xyz[...,0], xyz[...,1], xyz[...,2]
-    dx = np.diff(x, axis=0, prepend=x[0:1]); dy = np.diff(y, axis=0, prepend=y[0:1])
-    v  = np.sqrt(dx*dx + dy*dy)
-    Fx,Fy,Fv,Fc = _stats(x), _stats(y), _stats(v), _stats(c)
+    J = X_win.shape[1] // 3
+    xyz = X_win.reshape(T, J, 3)
+    x, y, c = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+    dx = np.diff(x, axis=0, prepend=x[0:1])
+    dy = np.diff(y, axis=0, prepend=y[0:1])
+    v = np.sqrt(dx * dx + dy * dy)
+    Fx, Fy, Fv, Fc = _stats(x), _stats(y), _stats(v), _stats(c)
+
+    # distancias pares entre puntos clave (ajusta según tu dataset)
+    pairs = [(5, 6), (11, 12), (23, 24)] if J >= 25 else [(5, 6), (9, 10), (11, 12)]
     D = []
-    for (i,j) in PAIR_DISTS:
-        dij = np.sqrt((x[:,i]-x[:,j])**2 + (y[:,i]-y[:,j])**2)
+    for (i, j) in pairs:
+        dij = np.sqrt((x[:, i] - x[:, j]) ** 2 + (y[:, i] - y[:, j]) ** 2)
         D += [dij.mean(), dij.std()]
     D = np.array(D, np.float32)
-    feat = np.concatenate([Fx,Fy,Fv,Fc,D], axis=0).astype(np.float32)
-    return feat.reshape(1,-1)
+
+    feat = np.concatenate([Fx, Fy, Fv, Fc, D], axis=0).astype(np.float32)
+    return feat.reshape(1, -1)
+
 
 def stratified_split_by_domain(vid_ids, domains, val_ratio, test_ratio, seed=SEED):
     rng = np.random.RandomState(seed)
@@ -137,7 +145,7 @@ print(f"Split: train={len(ytr)} val={len(yva)} test={len(yte)}")
 
 # === Featurización tabular
 def batch_feats(Xb):
-    return np.concatenate([featurize_T51(w) for w in Xb], axis=0) if len(Xb) else np.zeros((0, 1), np.float32)
+    return np.concatenate([featurize_TK(w) for w in Xb], axis=0) if len(Xb) else np.zeros((0, 1), np.float32)
 Ftr = batch_feats(Xtr); Fva = batch_feats(Xva); Fte = batch_feats(Xte)
 print("Shapes feats:", Ftr.shape, Fva.shape, Fte.shape)
 
