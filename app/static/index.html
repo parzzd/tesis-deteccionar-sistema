@@ -99,8 +99,13 @@ const tokenKey = 'sicher.token';
 const emailKey = 'sicher.email';
 const wsMap = new Map();
 
-function wsBase(){ const proto = (location.protocol === 'https:') ? 'wss' : 'ws'; return `${proto}://${location.host}`; }
-function setWho(email){ $('#who').innerHTML = email ? `Autenticado: <b>${email}</b>` : 'No autenticado'; }
+function wsBase(){ 
+  const proto = (location.protocol === 'https:') ? 'wss' : 'ws'; 
+  return `${proto}://${location.host}`; 
+}
+function setWho(email){ 
+  $('#who').innerHTML = email ? `Autenticado: <b>${email}</b>` : 'No autenticado'; 
+}
 
 function rowCam(cfg){
   const div = document.createElement('div');
@@ -156,8 +161,7 @@ async function addCamera(){
   const cam_id = $('#cam_id').value.trim();
   const src = $('#cam_src').value.trim();
   if(!cam_id || !src) return alert('Completa cam_id y src');
-  const res = await fetch("/cameras",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cam_id,src})});
-  if(!res.ok){ alert('No se pudo registrar'); return; }
+  await fetch("/cameras",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cam_id,src})});
   await loadCameras();
 }
 
@@ -169,7 +173,8 @@ async function deleteCamera(cam_id){
 async function loadCameras(){
   const res = await fetch("/cameras");
   const cams = await res.json();
-  const list = $('#camList'); list.innerHTML='';
+  const list = $('#camList'); 
+  list.innerHTML='';
   cams.forEach(cfg=> list.appendChild(rowCam(cfg)));
   list.querySelectorAll('.btnOpen').forEach(b=>b.onclick=()=>openWS(b.dataset.cam));
   list.querySelectorAll('.btnClose').forEach(b=>b.onclick=()=>closeWS(b.dataset.cam));
@@ -179,35 +184,42 @@ async function loadCameras(){
 function openWS(cam_id){
   if(!$('#card-'+cam_id)) $('#camGrid').appendChild(camCard(cam_id));
   if(wsMap.has(cam_id)) return;
+
   const url = wsBase()+`/ws/stream/${encodeURIComponent(cam_id)}`;
   const ws = new WebSocket(url);
+
   ws.onopen = ()=>{ $('#srv').textContent = url; setDot(cam_id, '#18a558'); };
   ws.onclose = ()=>{ setDot(cam_id, '#666'); wsMap.delete(cam_id); };
   ws.onerror = ()=>{ setDot(cam_id, '#ff4757'); };
+
   ws.onmessage = (ev)=>{
     try{
       const msg = JSON.parse(ev.data);
       if(msg.type==='frame'){
         const img = $('#img-'+msg.cam_id);
         if(img && msg.jpg_b64) img.src = 'data:image/jpeg;base64,'+msg.jpg_b64;
-        const pvid = (msg.p_vid ?? msg.pwin ?? msg.p_win ?? msg.prob ?? 0);
-        const pwin = (msg.p_win ?? msg.pwin ?? msg.prob ?? null);
+
+        const pvid = msg.p_vid ?? msg.pwin ?? msg.p_win ?? msg.prob ?? 0;
+        const pwin = msg.p_win ?? msg.pwin ?? msg.prob ?? null;
+
         $('#prob-'+msg.cam_id).textContent = Number(pvid).toFixed(3);
         $('#ts-'+msg.cam_id).textContent = new Date((msg.ts||Date.now()/1000)*1000).toLocaleTimeString();
+
         const meta = $('#meta-'+msg.cam_id);
         if(meta) meta.textContent = (pwin!=null)
           ? `p_win: ${Number(pwin).toFixed(3)} · p_vid: ${Number(pvid).toFixed(3)}`
           : `prob: ${Number(pvid).toFixed(3)}`;
+
         const st = $('#state-'+msg.cam_id);
         if(msg.on){ st.textContent='ALERTA'; st.className='alert'; }
         else { st.textContent='OK'; st.className='ok'; }
-      } else if(msg.type==='alert'){
+      } 
+      else if(msg.type==='alert'){
         addAlert(msg);
-      } else if(msg.type==='error'){
-        addAlert({cam_id: msg.cam_id||'?', prob:0, ts: Date.now()/1000});
       }
     }catch(e){ console.error(e); }
   };
+
   wsMap.set(cam_id, ws);
 }
 
@@ -216,22 +228,64 @@ function closeWS(cam_id){
   if(ws){ ws.close(); wsMap.delete(cam_id); }
 }
 
-function setDot(cam_id, color){
-  const dot = $('#dot-'+cam_id); if(dot) dot.style.background = color;
+// ------------------------------
+//  WEBCAM DESDE EL NAVEGADOR
+// ------------------------------
+let webcamWS = null;
+
+async function startLocalWebcam(){
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.width = 640;
+  video.height = 480;
+
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+  }catch(err){
+    alert("No se pudo acceder a la webcam: " + err);
+    return;
+  }
+
+  // crea tarjeta de cámara
+  const id = "webcam";
+  if(!$('#card-'+id)) $('#camGrid').appendChild(camCard(id));
+
+  // conectar WS
+  const wsUrl = wsBase() + `/ws/webcam`;
+  webcamWS = new WebSocket(wsUrl);
+  webcamWS.onopen = ()=> console.log("Webcam WS conectado");
+  webcamWS.onclose = ()=> console.log("Webcam WS cerrado");
+
+  setInterval(()=>{
+    if(video.readyState === video.HAVE_ENOUGH_DATA){
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
+
+      const jpg = canvas.toDataURL("image/jpeg", 0.6);
+      const b64 = jpg.split(",")[1];
+
+      if(webcamWS.readyState === WebSocket.OPEN){
+        webcamWS.send(JSON.stringify({ frame: b64 }));
+      }
+    }
+  }, 120); // ~8 fps
 }
 
-// Wire UI
 $('#btnLogout').onclick = logout;
 $('#btnAdd').onclick = addCamera;
 $('#btnReload').onclick = loadCameras;
 
-// Init: exige sesión
 (function init(){
   const token = localStorage.getItem(tokenKey);
   const email = localStorage.getItem(emailKey);
   if(!token){ window.location.href = '/static/login.html'; return; }
   setWho(email || '');
   loadCameras();
+  startLocalWebcam(); 
 })();
 </script>
 </body>
