@@ -1,0 +1,39 @@
+# Evita enviar datasets y modelos enormes
+models/
+models_mix/
+checkpoints/
+dataset/
+data/
+weights/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Cache y basura
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+
+# Librerías locales
+*.whl
+
+# Repos pesados
+.git/
+.gitignore
+
+# Archivos de tu editor
+.vscode/
+.idea/
+
+# Archivos grandes
+*.mp4
+*.avi
+*.zip
+*.rar
+*.7z
+*.jpg
+*.png
+*.jpeg
