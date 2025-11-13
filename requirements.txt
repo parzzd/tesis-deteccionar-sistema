@@ -21,7 +21,7 @@ pillow==10.4.0
 python-jose==3.3.0
 typing_extensions==4.12.2
 
-# Torch CPU (compatible con ubuntu, para pose models)
+# Torch CPU (compatible con Ubuntu + Python 3.10)
 torch==2.2.1
 torchvision==0.17.1
 torchaudio==2.2.1
