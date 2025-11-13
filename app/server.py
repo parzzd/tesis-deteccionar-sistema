@@ -5,21 +5,13 @@ from pathlib import Path
 from collections import deque
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import numpy as np
 import joblib
-# from tensorflow.keras.models import load_model    # ===== KERAS DESACTIVADO =====
 from ultralytics import YOLO
-
-
-# ============================
-# LOGIN SIMPLE
-# ============================
-SIC_EMAIL = os.environ.get("SIC_EMAIL", "").strip()
-SIC_PASSWORD = os.environ.get("SIC_PASSWORD", "").strip()
 
 
 # ============================
@@ -29,7 +21,6 @@ ROOT_DIR = Path(__file__).resolve().parent
 STATIC_DIR = ROOT_DIR / "static"
 BASE_DIR = ROOT_DIR.parent
 
-# KERAS_MODEL = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51.keras"     # ===== KERAS DESACTIVADO =====
 NORM_STATS = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_norm_stats.npz"
 THRESH_JSON = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_threshold.json"
 LGBM_PKL = BASE_DIR / "models_mix" / "lgbm_model_F51.pkl"
@@ -43,43 +34,45 @@ TOPK = int(os.environ.get("POSE_TOPK", "4"))
 SEQ_LEN = 32
 CONF_MIN = 0.10
 MIN_VIS_FRAC = 0.30
-
-# ===== SOLO LGBM =====
-FUSION_W = 1.0   # antes 0.50, ahora SOLO LGBM
-
 POOL_METHOD = "topk"
 TOPK_FRAC = 0.20
 HYST_GAP = 0.10
 
-SEND_FPS = float(os.environ.get("SEND_FPS", "10"))
 FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "720"))
 JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "65"))
 DRAW_OVERLAY = os.environ.get("DRAW_OVERLAY", "1") != "0"
 VIDEO_MAX_SCORES = int(os.environ.get("VIDEO_MAX_SCORES", "900"))
 
+# ============================
+# LOGIN
+# ============================
+SIC_EMAIL = os.environ.get("SIC_EMAIL", "").strip()
+SIC_PASSWORD = os.environ.get("SIC_PASSWORD", "").strip()
+
 
 # ============================
-# UTILS
+# INICIAR APP UNA SOLA VEZ
+# ============================
+app = FastAPI(title="VigilIA – LGBM ONLY")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# ============================
+# UTILIDADES
 # ============================
 def pool_frame_to_51(kps_f: np.ndarray, W: int, H: int) -> np.ndarray:
     out = np.zeros((17, 3), dtype=np.float32)
     if kps_f is None or kps_f.size == 0:
         return out.reshape(-1)
-
     conf_j = np.nan_to_num(kps_f[..., 2], nan=0.0)
-    K = kps_f.shape[0]
-
     for j in range(17):
-        if K == 0:
-            break
         idx = int(np.argmax(conf_j[:, j]))
         c = conf_j[idx, j]
         if c > 0:
             x, y, _ = kps_f[idx, j, :]
-            if np.isfinite(x) and np.isfinite(y):
-                out[j, 0] = np.clip(x / max(W, 1), 0.0, 1.0)
-                out[j, 1] = np.clip(y / max(H, 1), 0.0, 1.0)
-                out[j, 2] = np.clip(c, 0.0, 1.0)
+            out[j, 0] = x / max(W, 1)
+            out[j, 1] = y / max(H, 1)
+            out[j, 2] = c
     return out.reshape(-1)
 
 
@@ -94,95 +87,62 @@ def pool_scores(scores, pool="topk", topk_frac=0.20):
     if not scores:
         return 0.0
     arr = np.asarray(scores, np.float32)
-    if pool == "max":
-        return float(arr.max())
-    if pool == "mean":
-        return float(arr.mean())
     k = max(1, int(len(arr) * topk_frac))
     return float(np.partition(arr, -k)[-k:].mean())
 
 
 # ============================
-# CARGA MODELOS
+# CARGA MODELO
 # ============================
 def load_artifacts():
-    # ============================
-    # KERAS DESACTIVADO
-    # ============================
-    # keras_model = load_model(str(KERAS_MODEL), compile=False)
-    keras_model = None
-
-    # ============================
-    # NORM STATS
-    # ============================
     stats = np.load(NORM_STATS)
     mu = stats["mean"].astype("float32")
     sd = stats["std"].astype("float32")
 
-    # THRESHOLD
     thr = float(json.loads(Path(THRESH_JSON).read_text()).get("best_threshold", 0.5))
 
-    # ============================
-    # LGBM SÍ SE USA
-    # ============================
-    lgbm = None
-    if LGBM_PKL.exists():
-        try:
-            lgbm = joblib.load(LGBM_PKL)
-        except:
-            pass
+    lgbm = joblib.load(LGBM_PKL) if LGBM_PKL.exists() else None
 
     pose = YOLO(POSE_WEIGHTS)
 
-    return keras_model, mu, sd, thr, lgbm, pose
+    return mu, sd, thr, lgbm, pose
 
 
 print("[BOOT] Cargando modelos...")
-KERAS, MU, SD, THR_ON, LGBM, POSE = load_artifacts()
-print("[BOOT] Modelos cargados sin KERAS (solo LGBM)")
+MU, SD, THR_ON, LGBM, POSE = load_artifacts()
+print("[BOOT] Modelos cargados correctamente.")
 THR_OFF = max(0.0, THR_ON - HYST_GAP)
 
 
 # ============================
-# FASTAPI
-# ============================
-app = FastAPI(title="VigilIA – LGBM ONLY")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-# ============================
-# LOGIN
+# RUTAS LOGIN
 # ============================
 @app.get("/")
 def home():
     return FileResponse(str(STATIC_DIR / "login.html"))
 
-
 @app.post("/login-form")
 async def login_form(request: Request):
-    form = await request.form()
-    email = form.get("email", "").strip()
-    password = form.get("password", "").strip()
+    data = await request.json()
+    email = data.get("email", "")
+    password = data.get("password", "")
 
     if email == SIC_EMAIL and password == SIC_PASSWORD:
-        return RedirectResponse(url="/dashboard", status_code=302)
-    return RedirectResponse(url="/login-fail", status_code=302)
+        return JSONResponse({"ok": True})
 
+    return JSONResponse({"error": "Credenciales inválidas"}, status_code=401)
 
 @app.get("/dashboard")
 def dashboard():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
-
 @app.get("/login-fail")
 def login_fail():
     return FileResponse(str(STATIC_DIR / "login_fail.html"))
 
-
 @app.get("/health")
 def health():
     return {"ok": True}
-
 
 # ============================
 # CÁMARAS RTSP / HTTP / archivo

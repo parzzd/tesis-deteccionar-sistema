@@ -1,39 +1,54 @@
-# Evita enviar datasets y modelos enormes
-models/
-models_mix/
-checkpoints/
-dataset/
-data/
-weights/
+# === DATASETS ENORMES ===
+CHAD_VIDEOS/
+Dataset_Le21+GMDCSA24/
+DATASETS_COMBINADOS/
+out_npz/
+out_npz_fall/
+out_npz_video/
+pruebas_fuera/
 
-# Entornos virtuales
-.venv/
+# === MODELOS ENORMES ===
+models_mix/mix_cnn_lstm_T32_F51.keras
+models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz
+models_mix/mix_cnn_lstm_T32_F51_threshold.json
+models_mix/lgbm_model_F51.pkl
+
+# Si solo quieres subir el LGBM descomenta esto:
+# !models_mix/lgbm_model_F51.pkl
+
+# === ENTORNO VIRTUAL ===
 venv/
+.venv/
 env/
 
-# Cache y basura
+# === GIT ===
+.git/
+.gitignore
+
+# === PYTHON CACHE ===
 __pycache__/
 *.pyc
 *.pyo
 *.tmp
 
-# Librerías locales
-*.whl
-
-# Repos pesados
-.git/
-.gitignore
-
-# Archivos de tu editor
+# === EDITORES ===
 .vscode/
 .idea/
 
-# Archivos grandes
+# === ARCHIVOS PESADOS ===
 *.mp4
 *.avi
+*.mov
 *.zip
 *.rar
 *.7z
+*.npy
+*.npz
 *.jpg
 *.png
 *.jpeg
+*.bmp
+# FORZAR estos 3 archivos
+!models_mix/lgbm_model_F51.pkl
+!models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz
+!models_mix/mix_cnn_lstm_T32_F51_threshold.json
