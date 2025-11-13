@@ -127,7 +127,9 @@ def load_artifacts():
     return keras_model, mu, sd, thr, lgbm, pose
 
 
+print("[BOOT] Cargando modelos...")
 KERAS, MU, SD, THR_ON, LGBM, POSE = load_artifacts()
+print("[BOOT] Modelos cargados correctamente.")
 THR_OFF = max(0.0, THR_ON - HYST_GAP)
 
 print("[BOOT] Modelos cargados.")

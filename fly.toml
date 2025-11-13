@@ -1,0 +1,21 @@
+app = "tesis-deteccionar-sistema"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  SIC_EMAIL = "seguro@cam.com"
+  SIC_PASSWORD = "123"
+
+[[services]]
+  internal_port = 8080
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]

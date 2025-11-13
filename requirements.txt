@@ -5,22 +5,26 @@ python-multipart==0.0.9
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
 
-tensorflow==2.15.0
+# TensorFlow CPU (Fly.io compatible)
+tensorflow-cpu==2.15.0
+
 scikit-learn==1.5.2
 joblib==1.4.2
 
 pydantic==2.12.3
 python-dotenv==1.0.1
 
+# YOLOv8/11
 ultralytics==8.3.221
+
+# LightGBM CPU
 lightgbm==4.1.0
 
 requests==2.32.3
 pillow==10.4.0
+
 python-jose==3.3.0
 typing_extensions>=4.14.1
 
-# Torch CPU para Python 3.11 + Linux (compatible con Ultralytics)
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
+# Para compatibilidad con YOLO Pose + TF
+onnxruntime==1.18.0
