@@ -1,4 +1,4 @@
-# === DATASETS ENORMES ===
+# === DATASETS ENORMES (OK excluirlos) ===
 CHAD_VIDEOS/
 Dataset_Le21+GMDCSA24/
 DATASETS_COMBINADOS/
@@ -6,15 +6,6 @@ out_npz/
 out_npz_fall/
 out_npz_video/
 pruebas_fuera/
-
-# === MODELOS ENORMES ===
-models_mix/mix_cnn_lstm_T32_F51.keras
-models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz
-models_mix/mix_cnn_lstm_T32_F51_threshold.json
-models_mix/lgbm_model_F51.pkl
-
-# Si solo quieres subir el LGBM descomenta esto:
-# !models_mix/lgbm_model_F51.pkl
 
 # === ENTORNO VIRTUAL ===
 venv/
@@ -35,20 +26,20 @@ __pycache__/
 .vscode/
 .idea/
 
-# === ARCHIVOS PESADOS ===
+# === ARCHIVOS PESADOS (OK excluirlos) ===
 *.mp4
 *.avi
 *.mov
 *.zip
 *.rar
 *.7z
-*.npy
-*.npz
-*.jpg
-*.png
-*.jpeg
-*.bmp
-# FORZAR estos 3 archivos
-!models_mix/lgbm_model_F51.pkl
-!models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz
-!models_mix/mix_cnn_lstm_T32_F51_threshold.json
+
+# 🚨 NO ignores archivos del modelo 🚨
+# Elimina cualquier línea que ignore models_mix
+# Elimina reglas globales "*.npz", "*.pkl"
+
+# Permitir modelos
+!app/models_mix/
+!app/models_mix/*.json
+!app/models_mix/*.npz
+!app/models_mix/*.pkl

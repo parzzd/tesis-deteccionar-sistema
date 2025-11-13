@@ -69,9 +69,12 @@ async function doLogin() {
     });
 
     if (res.status === 200) {
+      localStorage.setItem('sicher.token', 'ok');   // token ficticio
+      localStorage.setItem('sicher.email', email);  // guardar email para el header
       window.location.href = "/dashboard";
       return;
-    } else {
+    }
+    else {
       errBox.textContent = "Credenciales inválidas";
       errBox.style.display = 'block';
     }
