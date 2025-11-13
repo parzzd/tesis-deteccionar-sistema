@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: tesis-mvp
+    name: TESIS-DETECCIONAR-SISTEMA
     env: python
     pythonVersion: 3.11
     plan: free
