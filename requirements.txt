@@ -17,11 +17,10 @@ lightgbm==4.1.0
 
 requests==2.32.3
 pillow==10.4.0
-
 python-jose==3.3.0
 typing_extensions==4.12.2
 
-# Torch CPU (compatible con Ubuntu + Python 3.10)
-torch==2.2.1
-torchvision==0.17.1
-torchaudio==2.2.1
+# Torch CPU para Python 3.11 + Linux (compatible con Ultralytics)
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2

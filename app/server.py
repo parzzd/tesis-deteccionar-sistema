@@ -1,18 +1,16 @@
 # uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
 import os, json, time, base64, asyncio
-from typing import Dict, Any, Optional, Set, List
+from typing import Dict, Any, Optional, Set
 from pathlib import Path
 from collections import deque
-from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import numpy as np
 import joblib
-import tensorflow as tf
 from tensorflow.keras.models import load_model
 from ultralytics import YOLO
 
