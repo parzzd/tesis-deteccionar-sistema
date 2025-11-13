@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 import numpy as np
 import joblib
-from tensorflow.keras.models import load_model
+# from tensorflow.keras.models import load_model    # ===== KERAS DESACTIVADO =====
 from ultralytics import YOLO
 
 
@@ -29,12 +29,12 @@ ROOT_DIR = Path(__file__).resolve().parent
 STATIC_DIR = ROOT_DIR / "static"
 BASE_DIR = ROOT_DIR.parent
 
-KERAS_MODEL = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51.keras"
+# KERAS_MODEL = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51.keras"     # ===== KERAS DESACTIVADO =====
 NORM_STATS = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_norm_stats.npz"
 THRESH_JSON = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_threshold.json"
 LGBM_PKL = BASE_DIR / "models_mix" / "lgbm_model_F51.pkl"
 
-POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11m-pose.pt")
+POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11n-pose.pt")
 IMGSZ = int(os.environ.get("POSE_IMGSZ", "640"))
 CONF_POSE = float(os.environ.get("POSE_CONF", "0.25"))
 IOU_POSE = float(os.environ.get("POSE_IOU", "0.50"))
@@ -44,7 +44,9 @@ SEQ_LEN = 32
 CONF_MIN = 0.10
 MIN_VIS_FRAC = 0.30
 
-FUSION_W = 0.50
+# ===== SOLO LGBM =====
+FUSION_W = 1.0   # antes 0.50, ahora SOLO LGBM
+
 POOL_METHOD = "topk"
 TOPK_FRAC = 0.20
 HYST_GAP = 0.10
@@ -78,14 +80,12 @@ def pool_frame_to_51(kps_f: np.ndarray, W: int, H: int) -> np.ndarray:
                 out[j, 0] = np.clip(x / max(W, 1), 0.0, 1.0)
                 out[j, 1] = np.clip(y / max(H, 1), 0.0, 1.0)
                 out[j, 2] = np.clip(c, 0.0, 1.0)
-
     return out.reshape(-1)
 
 
 def frame_visible(kps_f: np.ndarray, conf_min=CONF_MIN) -> bool:
     if kps_f is None or kps_f.size == 0:
         return False
-
     conf = np.nan_to_num(kps_f[..., 2], nan=0.0)
     return bool((conf >= conf_min).any())
 
@@ -98,7 +98,6 @@ def pool_scores(scores, pool="topk", topk_frac=0.20):
         return float(arr.max())
     if pool == "mean":
         return float(arr.mean())
-
     k = max(1, int(len(arr) * topk_frac))
     return float(np.partition(arr, -k)[-k:].mean())
 
@@ -107,14 +106,25 @@ def pool_scores(scores, pool="topk", topk_frac=0.20):
 # CARGA MODELOS
 # ============================
 def load_artifacts():
-    keras_model = load_model(str(KERAS_MODEL), compile=False)
+    # ============================
+    # KERAS DESACTIVADO
+    # ============================
+    # keras_model = load_model(str(KERAS_MODEL), compile=False)
+    keras_model = None
 
+    # ============================
+    # NORM STATS
+    # ============================
     stats = np.load(NORM_STATS)
     mu = stats["mean"].astype("float32")
     sd = stats["std"].astype("float32")
 
+    # THRESHOLD
     thr = float(json.loads(Path(THRESH_JSON).read_text()).get("best_threshold", 0.5))
 
+    # ============================
+    # LGBM SÍ SE USA
+    # ============================
     lgbm = None
     if LGBM_PKL.exists():
         try:
@@ -129,16 +139,14 @@ def load_artifacts():
 
 print("[BOOT] Cargando modelos...")
 KERAS, MU, SD, THR_ON, LGBM, POSE = load_artifacts()
-print("[BOOT] Modelos cargados correctamente.")
+print("[BOOT] Modelos cargados sin KERAS (solo LGBM)")
 THR_OFF = max(0.0, THR_ON - HYST_GAP)
-
-print("[BOOT] Modelos cargados.")
 
 
 # ============================
 # FASTAPI
 # ============================
-app = FastAPI(title="VigilIA – MVP WebCam + RTSP")
+app = FastAPI(title="VigilIA – LGBM ONLY")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -234,14 +242,17 @@ class CameraWorker:
         return norm.reshape(1, T, F).astype("float32")
 
     # ------------------------------------------
-    # PREDICCIÓN
+    # PREDICCIÓN (SIN KERAS)
     # ------------------------------------------
     def _predict_window(self, Xw):
         X = self._norm_apply(Xw)
-        p_keras = float(KERAS.predict(X, verbose=0).ravel()[0])
-        p_keras = float(np.clip(p_keras, 0, 1))
 
-        if LGBM is None or FUSION_W <= 0:
+        # ===== KERAS DESACTIVADO =====
+        # p_keras = float(KERAS.predict(X, verbose=0).ravel()[0])
+        # p_keras = float(np.clip(p_keras, 0, 1))
+        p_keras = 0.0
+
+        if LGBM is None:
             return p_keras
 
         x3 = Xw.reshape(Xw.shape[0], 17, 3)
@@ -263,9 +274,10 @@ class CameraWorker:
         try:
             p_lgbm = float(LGBM.predict_proba(feat.reshape(1, -1))[:, 1][0])
         except:
-            p_lgbm = p_keras
+            p_lgbm = 0.0
 
-        return (1 - FUSION_W) * p_keras + FUSION_W * p_lgbm
+        return p_lgbm  # ===== SOLO LGBM =====
+
 
     # ------------------------------------------
     # PROCESAR UN FRAME (para webcam)
@@ -274,7 +286,7 @@ class CameraWorker:
         await self._process_frame_logic(frame)
 
     # ------------------------------------------
-    # PROCESAR FRAME (comparten RTSP y webcam)
+    # PROCESAR FRAME
     # ------------------------------------------
     async def _process_frame_logic(self, frame):
         import cv2
@@ -284,8 +296,10 @@ class CameraWorker:
         p_vid = 0.0
 
         try:
-            res = POSE.predict(frame_full, imgsz=IMGSZ, conf=CONF_POSE,
-                               iou=IOU_POSE, verbose=False, half=False)[0]
+            res = POSE.predict(
+                frame_full, imgsz=IMGSZ, conf=CONF_POSE,
+                iou=IOU_POSE, verbose=False, half=False
+            )[0]
 
             kps_f = None
             if res.keypoints is not None and res.keypoints.xy is not None:
@@ -329,10 +343,12 @@ class CameraWorker:
 
                     if not self.on_state and p_vid >= THR_ON:
                         self.on_state = True
-                        await self.broadcast({"type": "alert",
-                                              "cam_id": self.cam_id,
-                                              "prob": float(p_vid),
-                                              "ts": time.time()})
+                        await self.broadcast({
+                            "type": "alert",
+                            "cam_id": self.cam_id,
+                            "prob": float(p_vid),
+                            "ts": time.time()
+                        })
                     elif self.on_state and p_vid <= THR_OFF:
                         self.on_state = False
 
@@ -345,7 +361,6 @@ class CameraWorker:
         except:
             show = frame_full
 
-        # resize
         if FRAME_WIDTH and show.shape[1] > FRAME_WIDTH:
             new_h = int(show.shape[0] * (FRAME_WIDTH / show.shape[1]))
             show = cv2.resize(show, (FRAME_WIDTH, new_h))
@@ -365,6 +380,7 @@ class CameraWorker:
         }
 
         await self.broadcast(payload)
+
 
     # ------------------------------------------
     # BROADCAST
