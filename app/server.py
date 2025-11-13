@@ -3,34 +3,30 @@ import os, time, json, base64, asyncio
 from typing import Dict, Any, Optional, Set, List
 from pathlib import Path
 from collections import deque
-
 from datetime import datetime, timedelta
-from fastapi.responses import JSONResponse
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from ultralytics import YOLO
 import numpy as np
 import joblib
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException,Request
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from ultralytics import YOLO
-from dotenv import load_dotenv
-# venv\Scripts\python -m uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
-# --- LOGIN SIMPLE (.env) ---
-SIC_EMAIL    = os.getenv("SIC_EMAIL", "")
-SIC_PASSWORD = os.getenv("SIC_PASSWORD", "")
+# --- LOGIN SIMPLE (variables de entorno) ---
+SIC_EMAIL    = os.environ.get("SIC_EMAIL", "")
+SIC_PASSWORD = os.environ.get("SIC_PASSWORD", "")
 
 ROOT_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = (ROOT_DIR / "static").resolve()
+BASE_DIR = Path(__file__).resolve().parent.parent  
 
-KERAS_MODEL = Path("./models_mix/mix_cnn_lstm_T32_F51.keras")
-NORM_STATS  = Path("./models_mix/mix_cnn_lstm_T32_F51_norm_stats.npz")
-THRESH_JSON = Path("./models_mix/mix_cnn_lstm_T32_F51_threshold.json")
-LGBM_PKL    = Path("./models_mix/lgbm_model_F51.pkl")  # opcional
+KERAS_MODEL = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51.keras"
+NORM_STATS  = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_norm_stats.npz"
+THRESH_JSON = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_threshold.json"
+LGBM_PKL    = BASE_DIR / "models_mix" / "lgbm_model_F51.pkl" 
 
 # Pose
 POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11m-pose.pt")
@@ -54,11 +50,13 @@ HYST_GAP    = 0.10     # thr_off = thr_on - gap
 SEND_FPS      = float(os.environ.get("SEND_FPS", "10"))
 FRAME_WIDTH   = int(os.environ.get("FRAME_WIDTH", "720"))
 JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "65"))
-DRAW_OVERLAY  = os.getenv("DRAW_OVERLAY", "1") != "0"
-VIDEO_MAX_SCORES = int(os.getenv("VIDEO_MAX_SCORES", "900"))  # ~1–2 min
+DRAW_OVERLAY  = os.environ.get("DRAW_OVERLAY", "1") != "0"
+VIDEO_MAX_SCORES = int(os.environ.get("VIDEO_MAX_SCORES", "900"))  # ~1–2 min
+
 FAILED_ATTEMPTS: dict[str, dict] = {}
 MAX_ATTEMPTS = 3
 BLOCK_TIME_MINUTES = 5
+
 # =========================
 # UTILS (pose → 51f, pooling, etc.)
 # =========================
@@ -135,12 +133,12 @@ print(f"[BOOT] Keras={KERAS_MODEL} | THR_ON={THR_ON:.2f} THR_OFF={THR_OFF:.2f} |
 # =========================
 app = FastAPI(title="VigilIA – Detección (Keras + LGBM opcional)")
 
-# servir estáticos
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 else:
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
 
 # Home → login.html
 @app.get("/")
