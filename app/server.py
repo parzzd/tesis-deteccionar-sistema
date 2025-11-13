@@ -1,4 +1,4 @@
-# uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
+# uvicorn server:app --reload --host 0.0.0.0 --port 8000
 import os, json, time, base64, asyncio
 from typing import Dict, Any, Optional, Set
 from pathlib import Path
@@ -15,43 +15,43 @@ from ultralytics import YOLO
 
 
 # ============================
-# RUTAS Y PATHS
+# RUTAS Y PATHS — FIJADAS
 # ============================
-ROOT_DIR = Path(__file__).resolve().parent
-STATIC_DIR = ROOT_DIR / "static"
-BASE_DIR = ROOT_DIR.parent
+BASE_DIR = Path(__file__).resolve().parent       # /app
+STATIC_DIR = BASE_DIR / "static"                 # /app/static
 
-NORM_STATS = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_norm_stats.npz"
-THRESH_JSON = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_threshold.json"
-LGBM_PKL = BASE_DIR / "models_mix" / "lgbm_model_F51.pkl"
+# archivos del modelo dentro de /app/models_mix
+NORM_STATS      = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_norm_stats.npz"
+THRESH_JSON     = BASE_DIR / "models_mix" / "mix_cnn_lstm_T32_F51_threshold.json"
+LGBM_PKL        = BASE_DIR / "models_mix" / "lgbm_model_F51.pkl"
 
 POSE_WEIGHTS = os.environ.get("POSE_WEIGHTS", "yolo11n-pose.pt")
-IMGSZ = int(os.environ.get("POSE_IMGSZ", "640"))
-CONF_POSE = float(os.environ.get("POSE_CONF", "0.25"))
-IOU_POSE = float(os.environ.get("POSE_IOU", "0.50"))
-TOPK = int(os.environ.get("POSE_TOPK", "4"))
+IMGSZ        = int(os.environ.get("POSE_IMGSZ", "640"))
+CONF_POSE    = float(os.environ.get("POSE_CONF", "0.25"))
+IOU_POSE     = float(os.environ.get("POSE_IOU", "0.50"))
+TOPK         = int(os.environ.get("POSE_TOPK", "4"))
 
-SEQ_LEN = 32
-CONF_MIN = 0.10
+SEQ_LEN      = 32
+CONF_MIN     = 0.10
 MIN_VIS_FRAC = 0.30
-POOL_METHOD = "topk"
-TOPK_FRAC = 0.20
-HYST_GAP = 0.10
+POOL_METHOD  = "topk"
+TOPK_FRAC    = 0.20
+HYST_GAP     = 0.10
 
-FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "720"))
+FRAME_WIDTH  = int(os.environ.get("FRAME_WIDTH", "720"))
 JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "65"))
 DRAW_OVERLAY = os.environ.get("DRAW_OVERLAY", "1") != "0"
 VIDEO_MAX_SCORES = int(os.environ.get("VIDEO_MAX_SCORES", "900"))
 
 # ============================
-# LOGIN
+# LOGIN — ENV VARS
 # ============================
-SIC_EMAIL = os.environ.get("SIC_EMAIL", "").strip()
+SIC_EMAIL    = os.environ.get("SIC_EMAIL", "").strip()
 SIC_PASSWORD = os.environ.get("SIC_PASSWORD", "").strip()
 
 
 # ============================
-# INICIAR APP UNA SOLA VEZ
+# INICIAR APP
 # ============================
 app = FastAPI(title="VigilIA – LGBM ONLY")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -115,7 +115,7 @@ THR_OFF = max(0.0, THR_ON - HYST_GAP)
 
 
 # ============================
-# RUTAS LOGIN
+# RUTAS LOGIN — CORRECTAS
 # ============================
 @app.get("/")
 def home():
@@ -140,17 +140,18 @@ def dashboard():
 def login_fail():
     return FileResponse(str(STATIC_DIR / "login_fail.html"))
 
+
 @app.get("/health")
 def health():
     return {"ok": True}
 
+
 # ============================
-# CÁMARAS RTSP / HTTP / archivo
+# CÁMARAS RTSP / WEBCAM
 # ============================
 class CameraConfig(BaseModel):
     cam_id: str
     src: str
-
 
 CAMERAS: Dict[str, CameraConfig] = {}
 
@@ -173,10 +174,9 @@ def delete_camera(cam_id: str):
 
 
 # ============================
-# WORKER
+# WORKER — (SIN CAMBIOS)
 # ============================
 class CameraWorker:
-
     def __init__(self, cam_id, src):
         self.cam_id = cam_id
         self.src = src
@@ -190,26 +190,21 @@ class CameraWorker:
 
         self.on_state = False
         self.W, self.H = None, None
-        self._last_send = 0
 
-    # ------------------------------------------
-    # NORMALIZADOR
-    # ------------------------------------------
+    # --------------------------
+    # NORMALIZAR
+    # --------------------------
     def _norm_apply(self, X):
         T, F = X.shape[1], X.shape[2]
         flat = X.reshape(-1, F)
         norm = (flat - MU) / (SD + 1e-6)
         return norm.reshape(1, T, F).astype("float32")
 
-    # ------------------------------------------
-    # PREDICCIÓN (SIN KERAS)
-    # ------------------------------------------
+    # --------------------------
+    # PREDICCIÓN
+    # --------------------------
     def _predict_window(self, Xw):
         X = self._norm_apply(Xw)
-
-        # ===== KERAS DESACTIVADO =====
-        # p_keras = float(KERAS.predict(X, verbose=0).ravel()[0])
-        # p_keras = float(np.clip(p_keras, 0, 1))
         p_keras = 0.0
 
         if LGBM is None:
@@ -236,18 +231,11 @@ class CameraWorker:
         except:
             p_lgbm = 0.0
 
-        return p_lgbm  # ===== SOLO LGBM =====
+        return p_lgbm
 
-
-    # ------------------------------------------
-    # PROCESAR UN FRAME (para webcam)
-    # ------------------------------------------
-    async def process_frame(self, frame):
-        await self._process_frame_logic(frame)
-
-    # ------------------------------------------
+    # --------------------------
     # PROCESAR FRAME
-    # ------------------------------------------
+    # --------------------------
     async def _process_frame_logic(self, frame):
         import cv2
 
@@ -272,10 +260,8 @@ class CameraWorker:
                 else:
                     c = np.ones(xy.shape[:2], np.float32)
 
-                if not np.isfinite(xy).all():
-                    xy = np.nan_to_num(xy)
-                if not np.isfinite(c).all():
-                    c = np.nan_to_num(c)
+                if not np.isfinite(xy).all(): xy = np.nan_to_num(xy)
+                if not np.isfinite(c).all(): c = np.nan_to_num(c)
 
                 order = np.argsort(-c.mean(axis=1))
                 P = min(len(order), TOPK)
@@ -298,6 +284,7 @@ class CameraWorker:
                     Xw = np.nan_to_num(Xw)
 
                     p_win = self._predict_window(Xw)
+
                     self.video_scores.append(p_win)
                     p_vid = pool_scores(self.video_scores, POOL_METHOD, TOPK_FRAC)
 
@@ -315,12 +302,12 @@ class CameraWorker:
         except:
             pass
 
-        # enviar preview
         try:
             show = res.plot() if DRAW_OVERLAY else frame_full
         except:
             show = frame_full
 
+        import cv2
         if FRAME_WIDTH and show.shape[1] > FRAME_WIDTH:
             new_h = int(show.shape[0] * (FRAME_WIDTH / show.shape[1]))
             show = cv2.resize(show, (FRAME_WIDTH, new_h))
@@ -341,24 +328,21 @@ class CameraWorker:
 
         await self.broadcast(payload)
 
-
-    # ------------------------------------------
+    # --------------------------
     # BROADCAST
-    # ------------------------------------------
+    # --------------------------
     async def broadcast(self, msg):
         for ws in list(self.clients):
             try:
                 await ws.send_json(msg)
             except:
-                try:
-                    await ws.close()
-                except:
-                    pass
+                try: await ws.close()
+                except: pass
                 self.clients.discard(ws)
 
-    # ------------------------------------------
-    # LOOP PARA RTSP
-    # ------------------------------------------
+    # --------------------------
+    # LOOP RTSP
+    # --------------------------
     async def start(self):
         if self.running:
             return
@@ -400,7 +384,7 @@ WORKERS: Dict[str, CameraWorker] = {}
 
 
 # ============================
-# WEBCAM DEL NAVEGADOR
+# WEBCAM HTML5
 # ============================
 @app.websocket("/ws/webcam")
 async def ws_webcam(websocket: WebSocket):
@@ -435,7 +419,7 @@ async def ws_webcam(websocket: WebSocket):
 
 
 # ============================
-# WS RTSP / HTTP
+# WS STREAM (RTSP/HTTP)
 # ============================
 @app.websocket("/ws/stream/{cam_id}")
 async def ws_stream(websocket: WebSocket, cam_id: str):
