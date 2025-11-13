@@ -1,22 +1,34 @@
-FROM python:3.11.9-slim-bookworm
+FROM python:3.11-slim-bookworm
+
+# Desactiva interacción
+ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# Más seguro (parches → menos CVE)
-RUN apt-get update && apt-get upgrade -y && apt-get install -y \
-    libglib2.0-0 libsm6 libxext6 libxrender1 ffmpeg && \
-    apt-get clean
+# 1. Dependencias mínimas del sistema (OpenCV + ffmpeg light)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    ffmpeg \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copiar dependencias
+# 2. Copiar requirements
 COPY requirements.txt .
 
-# Instalarlas
+# 3. Instalar torch CPU PEQUEÑO antes que Ultralytics
+# Evita que Ultralytics instale una versión mucho más pesada
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1
+
+# 4. Instalar dependencias restantes
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar TODO tu proyecto
+# 5. Copiar tu código
 COPY . .
 
-# Puerto que fly.io expone
+# Fly.io usa este puerto
 ENV PORT=8080
 
 CMD ["uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8080"]
