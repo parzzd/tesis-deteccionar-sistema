@@ -2,8 +2,7 @@ services:
   - type: web
     name: tesis-mvp
     env: python
-    plan: free
-    region: oregon
     pythonVersion: 3.11
+    plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app.server:app --host 0.0.0.0 --port $PORT"
